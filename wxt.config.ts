@@ -6,7 +6,7 @@ export default defineConfig({
   manifest: {
     name: 'EnhanceJira',
     description: 'Enhance Jira board cards with full Bitbucket PR approval data',
-    version: '0.3.2',
+    version: '0.3.5',
     permissions: ['storage'],
     host_permissions: [
       'https://*.atlassian.net/*',

@@ -22,10 +22,44 @@ export type Message =
   | { type: 'GET_PR_STATE'; key: string; tenant: string }
   | { type: 'VALIDATE_USERNAME'; username: string }
   | { type: 'GET_WORKSPACE_MEMBERS'; workspaceSlug: string }
+  | { type: 'RUN_DIAGNOSTICS'; credentials: Credentials; workspaceSlug: string }
   // Popup ↔ content-script messages. Sent via browser.tabs.sendMessage(tabId, ...);
   // do NOT route through the worker.
   | { type: 'GET_BOARD_COUNTS' }
   | { type: 'FORCE_REFRESH' };
+
+/**
+ * Per-probe outcome for the v0.3.3 diagnostics suite. The Test connection
+ * button on the options page runs four probes (account, pull requests,
+ * repositories, workspace members) in a fixed order and renders one row per
+ * `ProbeResult`. Token never appears in `detail` — only verbatim missing-scope
+ * names parsed from Bitbucket 403 responses, plus humanized HTTP status text.
+ */
+export type ProbeStatus = 'pass' | 'fail' | 'skipped';
+
+export type ProbeResult = {
+  id: 'connection' | 'pullrequest' | 'repository' | 'workspace';
+  /** Human-readable label, e.g. "Account access". */
+  label: string;
+  /** Bitbucket scope ID (or `''` for the connection probe). */
+  scope: string;
+  /**
+   * Display-only endpoint string, e.g. `/2.0/user`. Never includes the user's
+   * actual workspace slug, the host, query params, or any auth material.
+   */
+  endpoint: string;
+  status: ProbeStatus;
+  /**
+   * Optional error / skip reason. Token / URL / header material never reaches
+   * this field — only verbatim scope names from Bitbucket 403 bodies and
+   * humanized HTTP status text.
+   */
+  detail?: string;
+};
+
+export type DiagnosticsResponse =
+  | { ok: true; results: ProbeResult[]; username?: string; displayName?: string }
+  | { ok: false; error: string; results?: ProbeResult[] };
 
 export type PingResponse = { ok: true; time: number };
 
@@ -119,8 +153,10 @@ export type Response<T extends Message> = T extends { type: 'TEST_CONNECTION' }
           ? ValidateUsernameResponse
           : T extends { type: 'GET_WORKSPACE_MEMBERS' }
             ? GetWorkspaceMembersResponse
-            : T extends { type: 'GET_BOARD_COUNTS' }
-              ? GetBoardCountsResponse
-              : T extends { type: 'FORCE_REFRESH' }
-                ? ForceRefreshResponse
-                : never;
+            : T extends { type: 'RUN_DIAGNOSTICS' }
+              ? DiagnosticsResponse
+              : T extends { type: 'GET_BOARD_COUNTS' }
+                ? GetBoardCountsResponse
+                : T extends { type: 'FORCE_REFRESH' }
+                  ? ForceRefreshResponse
+                  : never;

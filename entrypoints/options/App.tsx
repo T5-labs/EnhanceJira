@@ -18,11 +18,12 @@ import {
 } from '../../lib/settingsIO';
 import { contrastRatio } from '../../lib/contrast';
 import type { TestConnectionResult } from '../../lib/auth';
-import type { Message } from '../../lib/messages';
+import type { DiagnosticsResponse, Message } from '../../lib/messages';
 import { ColorPicker } from './components/ColorPicker';
 import { RequiredApproversInput } from './components/RequiredApproversInput';
 import { SetupGuide } from './components/SetupGuide';
 import { ConnectedCard } from './components/ConnectedCard';
+import { DiagnosticsTable } from './components/DiagnosticsTable';
 
 const CARD_TEXT = '#172B4D';
 const WCAG_AA = 4.5;
@@ -56,6 +57,20 @@ async function sendMessage<M extends Message>(
   return (await browser.runtime.sendMessage(message)) as TestConnectionResult;
 }
 
+async function sendDiagnosticsMessage(
+  credentials: Credentials,
+  workspaceSlug: string,
+): Promise<DiagnosticsResponse> {
+  // NB: RUN_DIAGNOSTICS carries credentials. The worker's response shape never
+  // contains the token (see entrypoints/background.ts → runDiagnostics), so
+  // the result is safe to surface in UI.
+  return (await browser.runtime.sendMessage({
+    type: 'RUN_DIAGNOSTICS',
+    credentials,
+    workspaceSlug,
+  })) as DiagnosticsResponse;
+}
+
 export function App() {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [credentials, setCredentials] = useState<Credentials>(DEFAULT_CREDENTIALS);
@@ -66,6 +81,10 @@ export function App() {
   const [status, setStatus] = useState<ConnectionStatus>({ kind: 'loading' });
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestResult>({ kind: 'idle' });
+  // Per-scope diagnostics result from the most recent Test connection click.
+  // null = not yet run. Populated after the worker returns; the table component
+  // renders nothing while this is null so the page doesn't reserve empty space.
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsResponse | null>(null);
   // Snapshot of credentials (a) the last time Test connection was clicked, and
   // (b) the most recently persisted save. Used to determine whether the
   // current form values still match the values that produced the last
@@ -339,10 +358,15 @@ export function App() {
         kind: 'error',
         message: 'Enter your username and token first.',
       });
+      setDiagnostics({
+        ok: false,
+        error: 'Enter your username and token first.',
+      });
       return;
     }
     setTesting(true);
     setTestResult({ kind: 'idle' });
+    setDiagnostics(null);
     // Snapshot the credentials we're testing so per-field validation can
     // compare strict equality against the live form values — the green ✓
     // must clear the moment Alex edits either field after a successful test.
@@ -353,19 +377,56 @@ export function App() {
     };
     setLastTestedCredentials(tested);
     try {
-      const result = await sendMessage({
-        type: 'TEST_CONNECTION',
-        credentials: {
+      const response = await sendDiagnosticsMessage(
+        {
           version: 1,
           username: tested.username,
           token: tested.token,
         },
-      });
-      setTestResult({ kind: 'response', result });
+        settings.workspaceSlug,
+      );
+      setDiagnostics(response);
+      // Map the connection probe outcome onto the legacy testResult state so
+      // the per-field validation logic (priority-2 in `validationState`) keeps
+      // working without forking on the diagnostics shape.
+      if (response.ok) {
+        const connectionProbe = response.results.find((r) => r.id === 'connection');
+        if (connectionProbe && connectionProbe.status === 'pass' && response.username) {
+          const synthetic: TestConnectionResult = {
+            ok: true,
+            username: response.username,
+            displayName: response.displayName,
+          };
+          setTestResult({ kind: 'response', result: synthetic });
+        } else if (connectionProbe && connectionProbe.status === 'fail') {
+          const isAuthFailure =
+            (connectionProbe.detail || '').toLowerCase().includes('token rejected');
+          const synthetic: TestConnectionResult = {
+            ok: false,
+            status: isAuthFailure ? 401 : 0,
+            error: connectionProbe.detail || 'Connection probe failed',
+          };
+          setTestResult({ kind: 'response', result: synthetic });
+        } else {
+          setTestResult({ kind: 'idle' });
+        }
+        // Refresh the saved-credentials status row so a successful auth shows
+        // the green "Connected as @user" without waiting on a Save click.
+        void refreshStatus();
+      } else {
+        setTestResult({
+          kind: 'error',
+          message: response.error,
+        });
+      }
     } catch {
       setTestResult({
         kind: 'error',
         message: 'Could not reach the background worker.',
+      });
+      setDiagnostics({
+        ok: false,
+        error: 'Could not reach the background worker.',
       });
     } finally {
       setTesting(false);
@@ -383,6 +444,7 @@ export function App() {
     // would linger on emptied inputs until the next test/save.
     setLastTestedCredentials(null);
     setTestResult({ kind: 'idle' });
+    setDiagnostics(null);
     // Drop the sticky "tried to save without workspace slug" flag too so
     // a fresh-defaults form starts in the neutral state.
     setTriedSaveWithoutWorkspace(false);
@@ -399,6 +461,7 @@ export function App() {
       setLastTestedCredentials(null);
       setSavedCredentials(null);
       setTestResult({ kind: 'idle' });
+      setDiagnostics(null);
       setToast({ kind: 'success', message: 'Bitbucket credentials cleared' });
       // After wipe, the status row should immediately reflect "Not connected".
       void refreshStatus();
@@ -522,35 +585,73 @@ export function App() {
               >
                 {testing ? 'Testing…' : 'Test connection'}
               </button>
-              <TestResultRow result={testResult} />
+              {testResult.kind === 'error' && (
+                <span role="status" style={{ fontSize: 13, color: '#bf2600' }}>
+                  {testResult.message}
+                </span>
+              )}
             </div>
+            <DiagnosticsTable diagnostics={diagnostics} />
           </Section>
 
           {/* ── Approval rules ────────────────────────────────────────── */}
           <Section title="Approval rules">
-            <Field label="Minimum approvals" htmlFor="min-approvals">
-              <input
-                id="min-approvals"
-                type="number"
-                min={MIN_APPROVALS_MIN}
-                max={MIN_APPROVALS_MAX}
-                value={Number.isFinite(settings.minApprovals) ? settings.minApprovals : ''}
-                onChange={(e) => {
-                  const next = e.target.value === '' ? NaN : Number(e.target.value);
-                  setSettings({ ...settings, minApprovals: next });
-                }}
-                style={{
-                  ...textInputStyle,
-                  width: 100,
-                  borderColor: minApprovalsInvalid ? '#de350b' : '#c1c7d0',
-                }}
-              />
-              {minApprovalsInvalid && (
-                <p style={{ ...helpStyle, color: '#de350b' }}>
-                  must be between {MIN_APPROVALS_MIN} and {MIN_APPROVALS_MAX}
-                </p>
-              )}
-            </Field>
+            {/* Min approvals + Required approvers share a flex row on desktop
+                (≥700px). Min approvals takes a fixed 180px column; Required
+                approvers fills the remaining space. The row wraps to a stacked
+                column on narrow viewports so the layout still works on mobile. */}
+            <div
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 24,
+                alignItems: 'flex-start',
+                marginBottom: 16,
+              }}
+            >
+              <div style={{ width: 180, flexShrink: 0 }}>
+                <Field label="Minimum approvals" htmlFor="min-approvals">
+                  <input
+                    id="min-approvals"
+                    type="number"
+                    min={MIN_APPROVALS_MIN}
+                    max={MIN_APPROVALS_MAX}
+                    value={Number.isFinite(settings.minApprovals) ? settings.minApprovals : ''}
+                    onChange={(e) => {
+                      const next = e.target.value === '' ? NaN : Number(e.target.value);
+                      setSettings({ ...settings, minApprovals: next });
+                    }}
+                    style={{
+                      ...textInputStyle,
+                      width: 100,
+                      borderColor: minApprovalsInvalid ? '#de350b' : '#c1c7d0',
+                    }}
+                  />
+                  {minApprovalsInvalid && (
+                    <p style={{ ...helpStyle, color: '#de350b' }}>
+                      must be between {MIN_APPROVALS_MIN} and {MIN_APPROVALS_MAX}
+                    </p>
+                  )}
+                </Field>
+              </div>
+
+              <div style={{ flex: 1, minWidth: 280 }}>
+                <Field label="Required approvers" htmlFor="required-approvers">
+                  <RequiredApproversInput
+                    value={settings.approvers}
+                    onChange={(next) => setSettings({ ...settings, approvers: next })}
+                    workspaceSlug={settings.workspaceSlug}
+                    isConnected={isConnected}
+                  />
+                  <p style={helpStyle}>
+                    Track candidate approvers and toggle which are mandatory. Search
+                    workspace members above (requires a workspace slug). Each row is
+                    checked against Bitbucket — ✓ valid, ✗ typo or removed (the toggle
+                    still works but the user is excluded from the green-gate check).
+                  </p>
+                </Field>
+              </div>
+            </div>
 
             <Field
               label={
@@ -613,22 +714,6 @@ export function App() {
                     </span>
                   </>
                 )}
-              </p>
-            </Field>
-
-            <Field label="Required approvers" htmlFor="required-approvers">
-              <RequiredApproversInput
-                value={settings.approvers}
-                onChange={(next) => setSettings({ ...settings, approvers: next })}
-                workspaceSlug={settings.workspaceSlug}
-                isConnected={isConnected}
-              />
-              <p style={helpStyle}>
-                Track candidate approvers and toggle which are mandatory. Search workspace
-                members above (requires a workspace slug), or use &ldquo;Add manually&rdquo; for
-                anyone outside it. Each row is checked against Bitbucket — ✓ valid, ✗ typo
-                or removed (the toggle still works but the user is excluded from the
-                green-gate check).
               </p>
             </Field>
           </Section>
@@ -836,43 +921,6 @@ function ConnectionStatusRow({ status }: { status: ConnectionStatus }) {
     <div role="status" style={{ ...statusRowBaseStyle, color: '#bf2600', background: '#ffebe6', border: '1px solid #ffbdad' }}>
       ✗ {r.error} (HTTP {r.status})
     </div>
-  );
-}
-
-function TestResultRow({ result }: { result: TestResult }) {
-  if (result.kind === 'idle') return null;
-  if (result.kind === 'error') {
-    return (
-      <span role="status" style={{ fontSize: 13, color: '#bf2600' }}>
-        {result.message}
-      </span>
-    );
-  }
-  const r = result.result;
-  if (r.ok) {
-    return (
-      <span role="status" style={{ fontSize: 13, color: '#006644' }}>
-        ✓ Connected as @{r.username}
-      </span>
-    );
-  }
-  if (r.status === 0) {
-    return (
-      <span role="status" style={{ fontSize: 13, color: '#bf2600' }}>
-        ✗ {r.error}
-      </span>
-    );
-  }
-  // Error class: "Token rejected" → "✗ Token rejected (401)".
-  const headline = r.status === 401
-    ? 'Token rejected'
-    : r.status === 403
-      ? 'Forbidden'
-      : 'Failed';
-  return (
-    <span role="status" style={{ fontSize: 13, color: '#bf2600' }} title={r.error}>
-      ✗ {headline} ({r.status})
-    </span>
   );
 }
 

@@ -6,6 +6,48 @@ All notable changes to EnhanceJira are recorded here. The format is based on [Ke
 
 (Anything in progress goes here.)
 
+## [0.3.5] — 2026-04-29 — Fix pullrequest diagnostics probe
+
+### Fixed
+
+- Pull request diagnostics probe now hits a working endpoint (`/2.0/repositories/{ws}/{repo}/pullrequests`) instead of the now-removed `/2.0/pullrequests/{username}`. Bitbucket Cloud retired the user-scoped pullrequest list endpoint; previously the probe failed with "HTTP 404" for every user regardless of scope grant.
+
+### Changed
+
+- Diagnostics probe execution restructured: account → repository (sequential) → pullrequest + workspace (parallel). Pullrequest now uses the first repo discovered by the repository probe to verify scope on real data; if the workspace has no repos, the probe skips with "workspace has no repositories" rather than failing.
+- Connection probe's success detail now lists the granted OAuth scopes from the `x-oauth-scopes` response header (e.g. "Granted: read:user:bitbucket, read:pullrequest:bitbucket, ..."). Helps users verify all four scopes were granted.
+
+### Notes
+
+- Manifest version bumped to 0.3.5. Display order of the table rows in `DiagnosticsTable` is unchanged.
+
+## [0.3.4] — 2026-04-29 — Color-by-default fix + approvers UX polish
+
+### Fixed
+
+- Card coloring now applies in the default (non-hover) state. Previously the CSS rule targeted only the outer card wrapper element, while the visible card background was painted by a descendant (Atlassian's `platform-card.ui.card.focus-container` / `platform-board-kit.ui.card.ripple.div`), so Atlassian's own background covered ours until hover state changed CSS specificity. Rule now targets both the outer wrapper AND those descendants.
+
+### Changed
+
+- Removed the "Add manually" toggle from the Required approvers component. Search-by-workspace-member is the single path; users without a workspaceSlug set are informed via the search input's placeholder text.
+- Minimum approvals and Required approvers fields are now laid out side-by-side on the options page (within the same flex row, falls back to stacked at narrow viewports).
+
+### Notes
+
+- Manifest version bumped to 0.3.4. No schema migration. No worker behavior changes.
+
+## [0.3.3] — 2026-04-29 — Per-scope diagnostics on Test connection
+
+### Added
+
+- Test connection button now runs a 4-probe diagnostics suite (account, pull requests, repositories, workspace members) and renders a per-scope results table. Each row shows pass / fail / skipped with the specific scope ID and verbatim missing-scope detail from Bitbucket's 403 response when applicable. Lets users diagnose token-scope problems at a glance instead of running into them lazily later (e.g., when typing in the Required approvers search).
+- `RUN_DIAGNOSTICS` worker message orchestrates the probe run, parallelizes scope probes after the account probe seeds the username.
+- `DiagnosticsTable` component on the options page presents the results.
+
+### Notes
+
+- Manifest version bumped to 0.3.3. Inline single-line "✓ Connected as @username" / "✗ Token rejected" feedback below the Test button is replaced by the table; saved-credentials status row at the top of the credentials section is unchanged.
+
 ## [0.3.2] — 2026-04-29 — Fourth scope (`read:workspace:bitbucket`) + verbatim scope errors
 
 ### Added

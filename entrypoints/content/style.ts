@@ -10,6 +10,13 @@
  *     unrelated DOM, and it cannot fire on a card we haven't tagged.
  *   - `!important` is mandatory — Atlassian sets background-color inline on
  *     hover/selection/drag, and our rule must beat that.
+ *   - Each rule paints the OUTER card wrapper AND two known descendant
+ *     background-bearing elements (`platform-card.ui.card.focus-container`
+ *     and `platform-board-kit.ui.card.ripple.div`). Targeting the outer
+ *     wrapper alone leaves Atlassian's own descendant paint visible by
+ *     default and only loses to our rule on hover (when state-specific
+ *     selectors raise their specificity); painting the descendants too
+ *     ensures the chosen color is visible in the default state.
  *   - Only green/yellow/red are styled. 'no-pr', 'unknown', and 'error' get
  *     no background change so the card stays neutral; the tooltip (P6) is
  *     where users learn about errors.
@@ -33,9 +40,21 @@ function buildRootBlock(colors: {
 }
 
 const STATIC_RULES = `
-[data-testid="platform-board-kit.ui.card.card"][data-ej-state="green"]  { background-color: var(--ej-green)  !important; }
-[data-testid="platform-board-kit.ui.card.card"][data-ej-state="yellow"] { background-color: var(--ej-yellow) !important; }
-[data-testid="platform-board-kit.ui.card.card"][data-ej-state="red"]    { background-color: var(--ej-red)    !important; }
+[data-testid="platform-board-kit.ui.card.card"][data-ej-state="green"],
+[data-testid="platform-board-kit.ui.card.card"][data-ej-state="green"] [data-testid="platform-card.ui.card.focus-container"],
+[data-testid="platform-board-kit.ui.card.card"][data-ej-state="green"] [data-testid="platform-board-kit.ui.card.ripple.div"] {
+  background-color: var(--ej-green) !important;
+}
+[data-testid="platform-board-kit.ui.card.card"][data-ej-state="yellow"],
+[data-testid="platform-board-kit.ui.card.card"][data-ej-state="yellow"] [data-testid="platform-card.ui.card.focus-container"],
+[data-testid="platform-board-kit.ui.card.card"][data-ej-state="yellow"] [data-testid="platform-board-kit.ui.card.ripple.div"] {
+  background-color: var(--ej-yellow) !important;
+}
+[data-testid="platform-board-kit.ui.card.card"][data-ej-state="red"],
+[data-testid="platform-board-kit.ui.card.card"][data-ej-state="red"] [data-testid="platform-card.ui.card.focus-container"],
+[data-testid="platform-board-kit.ui.card.card"][data-ej-state="red"] [data-testid="platform-board-kit.ui.card.ripple.div"] {
+  background-color: var(--ej-red) !important;
+}
 `;
 
 const DEFAULT_COLORS = {

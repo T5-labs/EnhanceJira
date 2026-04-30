@@ -13,11 +13,8 @@ import type {
  *   - Search input. Disabled when not connected, or connected without a
  *     workspace slug. Otherwise typing ≥ 2 characters fires
  *     `GET_WORKSPACE_MEMBERS` (worker caches 24h) and surfaces a dropdown of
- *     up to 10 substring-matched members.
- *   - "Add manually" toggle reveals a small text input + Add button — covers
- *     users not in the workspace, or pre-workspace-slug setup. Manually-added
- *     entries default to `isRequired: false` and run the existing
- *     VALIDATE_USERNAME path so the row's validation badge updates.
+ *     up to 10 substring-matched members. Search-by-workspace-member is the
+ *     single path for adding approvers (v0.3.4+).
  *
  * Table:
  *   - One row per `ApproverEntry`. Avatar (with initials fallback), display
@@ -71,9 +68,6 @@ export function RequiredApproversInput({
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [memberError, setMemberError] = useState<string | null>(null);
   const [memberLoading, setMemberLoading] = useState(false);
-
-  const [showManual, setShowManual] = useState(false);
-  const [manualDraft, setManualDraft] = useState('');
 
   const [validations, setValidations] = useState<Map<string, ValidationBadge>>(
     () => new Map(),
@@ -316,13 +310,6 @@ export function RequiredApproversInput({
     setSearchOpen(false);
   }
 
-  function addManual() {
-    const trimmed = manualDraft.trim();
-    if (!trimmed) return;
-    addEntry({ username: trimmed, isRequired: false });
-    setManualDraft('');
-  }
-
   function removeAt(idx: number) {
     onChange(value.filter((_, i) => i !== idx));
   }
@@ -380,23 +367,6 @@ export function RequiredApproversInput({
             cursor: searchEnabled ? 'text' : 'not-allowed',
           }}
         />
-        <button
-          type="button"
-          onClick={() => setShowManual((v) => !v)}
-          aria-pressed={showManual}
-          style={{
-            padding: '6px 10px',
-            fontSize: 12,
-            background: '#f4f5f7',
-            color: '#172B4D',
-            border: '1px solid #c1c7d0',
-            borderRadius: 3,
-            cursor: 'pointer',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          Add manually
-        </button>
 
         {showDropdown && (
           <div
@@ -405,7 +375,7 @@ export function RequiredApproversInput({
               position: 'absolute',
               top: '100%',
               left: 0,
-              right: 80,
+              right: 0,
               maxHeight: 200,
               overflowY: 'auto',
               marginTop: 4,
@@ -484,49 +454,6 @@ export function RequiredApproversInput({
           </div>
         )}
       </div>
-
-      {/* ── Manual-add inline row ───────────────────────────────────── */}
-      {showManual && (
-        <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
-          <input
-            type="text"
-            value={manualDraft}
-            onChange={(e) => setManualDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                addManual();
-              }
-            }}
-            placeholder="paste a Bitbucket username"
-            style={{
-              flex: 1,
-              padding: '6px 10px',
-              fontSize: 13,
-              border: '1px solid #c1c7d0',
-              borderRadius: 3,
-              background: '#fff',
-              color: '#172B4D',
-            }}
-          />
-          <button
-            type="button"
-            onClick={addManual}
-            disabled={manualDraft.trim() === ''}
-            style={{
-              padding: '6px 10px',
-              fontSize: 12,
-              background: '#f4f5f7',
-              color: '#172B4D',
-              border: '1px solid #c1c7d0',
-              borderRadius: 3,
-              cursor: manualDraft.trim() === '' ? 'not-allowed' : 'pointer',
-            }}
-          >
-            Add
-          </button>
-        </div>
-      )}
 
       {/* ── Table ───────────────────────────────────────────────────── */}
       <div style={{ marginTop: 12 }}>
