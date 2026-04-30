@@ -1,0 +1,25 @@
+{
+  "name": "enhancejira",
+  "description": "Enhance Jira board cards with full Bitbucket PR approval data",
+  "version": "0.3.2",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "zip": "wxt zip",
+    "compile": "tsc --noEmit",
+    "postinstall": "wxt prepare"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@wxt-dev/module-react": "^1.2.2",
+    "typescript": "^6.0.3",
+    "wxt": "^0.20.25"
+  },
+  "dependencies": {
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
+  }
+}
