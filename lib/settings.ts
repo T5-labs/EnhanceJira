@@ -25,7 +25,7 @@
  * On save we always write v3.
  */
 
-import { isExtensionContextValid, warnOnce } from './log';
+import { info, isExtensionContextValid, warnOnce } from './log';
 
 const SETTINGS_SCHEMA_VERSION = 3 as const;
 const CREDENTIALS_SCHEMA_VERSION = 1 as const;
@@ -121,14 +121,32 @@ export const DEFAULT_SETTINGS: Settings = {
   approvers: [],
   workspaceSlug: '',
   colors: {
-    // Tailwind 600s — muted primaries.
-    green: '#16a34a',
-    yellow: '#ca8a04',
-    red: '#dc2626',
+    // Tailwind 800s — darker, blends with dark Jira themes.
+    green: '#166534',
+    yellow: '#854d0e',
+    red: '#991b1b',
   },
   expandBranchCardAvatars: true,
   branchCardAvatarCap: 5,
 };
+
+/**
+ * Older default palettes that shipped before the current Tailwind-800 set.
+ * `mergeSettings` walks each entry per slot — if the persisted hex matches ANY
+ * of these prior defaults (after normalization: lowercase, trimmed, 3-char →
+ * 6-char) we promote it to the new Tailwind-800 default silently. Anything
+ * that doesn't match is treated as a deliberate user customization and
+ * preserved on load.
+ *
+ *   - Tailwind-600 (the build immediately before Tailwind-800).
+ *   - Tailwind-100 pastels (an even older default — catches anyone still on
+ *     a stale settings record from before the 600 switch).
+ */
+const PREVIOUS_DEFAULT_COLORS: Record<'green' | 'yellow' | 'red', readonly string[]> = {
+  green: ['#16a34a', '#dcfce7'],
+  yellow: ['#ca8a04', '#fef9c3'],
+  red: ['#dc2626', '#fee2e2'],
+} as const;
 
 export const DEFAULT_CREDENTIALS: Credentials = {
   version: 1,
@@ -193,7 +211,14 @@ export async function loadSettings(): Promise<Settings> {
   try {
     const raw = await browser.storage.sync.get(SETTINGS_KEY);
     const stored = raw[SETTINGS_KEY] as Record<string, unknown> | undefined;
-    return mergeSettings(stored);
+    const merged = mergeSettings(stored);
+    // Diagnostic: surface the post-migration palette once per load so the
+    // Tailwind-600 → 800 upgrade is verifiable from DevTools without having
+    // to re-derive what's on disk. Keep this on the always-on `info` channel
+    // (not `debug`) so users reporting "still bright green" can quote the
+    // line without flipping `EJ_DEBUG` first.
+    info('settings loaded — colors:', { ...merged.colors });
+    return merged;
   } catch (e) {
     warnOnce('storage:loadSettings', e);
     return cloneDefaults();
@@ -366,18 +391,9 @@ function mergeSettings(stored: Record<string, unknown> | undefined): Settings {
     approvers,
     workspaceSlug,
     colors: {
-      green:
-        typeof colors['green'] === 'string'
-          ? (colors['green'] as string)
-          : DEFAULT_SETTINGS.colors.green,
-      yellow:
-        typeof colors['yellow'] === 'string'
-          ? (colors['yellow'] as string)
-          : DEFAULT_SETTINGS.colors.yellow,
-      red:
-        typeof colors['red'] === 'string'
-          ? (colors['red'] as string)
-          : DEFAULT_SETTINGS.colors.red,
+      green: migrateColor('green', colors['green']),
+      yellow: migrateColor('yellow', colors['yellow']),
+      red: migrateColor('red', colors['red']),
     },
     expandBranchCardAvatars,
     branchCardAvatarCap,
@@ -392,6 +408,48 @@ function cloneDefaults(): Settings {
     expandBranchCardAvatars: DEFAULT_SETTINGS.expandBranchCardAvatars,
     branchCardAvatarCap: DEFAULT_SETTINGS.branchCardAvatarCap,
   };
+}
+
+/**
+ * Load-time defaults migration for card colors.
+ *
+ * If the persisted hex matches ANY prior default for this slot (after
+ * normalization), promote it to the new Tailwind-800 default — users who
+ * never touched the colors get the upgrade silently. Anything else (custom
+ * hex, or already-upgraded value) is passed through UNNORMALIZED so deliberate
+ * customizations are preserved byte-for-byte. Missing / non-string fields
+ * fall back to the new default. The migration is purely a load-time
+ * transform — storage is only rewritten on the next options-page save.
+ *
+ * Normalization for the comparison only: lowercase, trim whitespace, and
+ * expand `#abc` → `#aabbcc`. This catches stale records persisted with
+ * unusual casing/whitespace (e.g. via a hand-edited backup) or 3-char hex.
+ */
+function migrateColor(
+  key: 'green' | 'yellow' | 'red',
+  raw: unknown,
+): string {
+  if (typeof raw !== 'string') return DEFAULT_SETTINGS.colors[key];
+  const normalized = normalizeHex(raw);
+  for (const prev of PREVIOUS_DEFAULT_COLORS[key]) {
+    if (normalized === normalizeHex(prev)) {
+      return DEFAULT_SETTINGS.colors[key];
+    }
+  }
+  return raw;
+}
+
+/**
+ * Lowercase + trim + expand `#abc` → `#aabbcc` for comparison purposes.
+ * Returns the input lowercased+trimmed if it doesn't match the 3- or 6-char
+ * `#` form so non-hex strings still produce a stable comparable value (they
+ * just won't match any known previous default and will be passed through).
+ */
+function normalizeHex(raw: string): string {
+  const v = raw.trim().toLowerCase();
+  const m3 = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/.exec(v);
+  if (m3) return `#${m3[1]}${m3[1]}${m3[2]}${m3[2]}${m3[3]}${m3[3]}`;
+  return v;
 }
 
 /**

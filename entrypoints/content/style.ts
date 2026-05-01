@@ -58,10 +58,10 @@ const STATIC_RULES = `
 `;
 
 const DEFAULT_COLORS = {
-  // Tailwind-600 defaults — kept in sync with lib/settings.ts DEFAULT_SETTINGS.
-  green: '#16a34a',
-  yellow: '#ca8a04',
-  red: '#dc2626',
+  // Tailwind-800 defaults — kept in sync with lib/settings.ts DEFAULT_SETTINGS.
+  green: '#166534',
+  yellow: '#854d0e',
+  red: '#991b1b',
 };
 
 /**
