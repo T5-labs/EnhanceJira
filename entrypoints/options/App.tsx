@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react';
 import {
+  BRANCH_CARD_AVATAR_CAP_MAX,
+  BRANCH_CARD_AVATAR_CAP_MIN,
   DEFAULT_CREDENTIALS,
   DEFAULT_SETTINGS,
   MIN_APPROVALS_MAX,
@@ -27,7 +29,6 @@ import { DiagnosticsTable } from './components/DiagnosticsTable';
 
 const CARD_TEXT = '#172B4D';
 const WCAG_AA = 4.5;
-const TOKEN_HELP_URL = 'https://id.atlassian.com/manage-profile/security/api-tokens';
 const MAX_CONTENT_WIDTH = '880px';
 
 type ToastKind = 'success' | 'error';
@@ -541,6 +542,70 @@ export function App() {
               </div>
             </Field>
 
+            <Field
+              label={
+                <>
+                  Workspace slug{' '}
+                  <span aria-hidden="true" style={{ color: '#dc2626' }}>
+                    *
+                  </span>
+                  <span className="sr-only"> (required)</span>
+                </>
+              }
+              htmlFor="workspace-slug"
+            >
+              <input
+                id="workspace-slug"
+                ref={workspaceSlugInputRef}
+                type="text"
+                value={settings.workspaceSlug}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    workspaceSlug: e.target.value,
+                  })
+                }
+                placeholder="your-workspace-slug"
+                spellCheck={false}
+                aria-required="true"
+                aria-label="Workspace slug *"
+                aria-invalid={
+                  workspaceSlugMissing && triedSaveWithoutWorkspace ? true : undefined
+                }
+                aria-describedby="workspace-slug-help"
+                style={{
+                  ...textInputStyle,
+                  ...(workspaceSlugMissing && triedSaveWithoutWorkspace
+                    ? { borderColor: '#fca5a5' }
+                    : {}),
+                }}
+              />
+              {workspaceSlugMissing && triedSaveWithoutWorkspace && (
+                <p
+                  role="alert"
+                  style={{ ...helpStyle, color: '#bf2600' }}
+                >
+                  Workspace slug is required.
+                </p>
+              )}
+              <p id="workspace-slug-help" style={helpStyle}>
+                <strong>Required.</strong> Find your workspace slug at the top of{' '}
+                <code>bitbucket.org</code> after login, or in any Bitbucket URL between{' '}
+                <code>bitbucket.org/</code> and the next slash (e.g.{' '}
+                <code>bitbucket.org/your-workspace/your-repo</code> →{' '}
+                <code>your-workspace</code>). The Required approvers search needs this to
+                find members.
+                {workspaceSlugMissing && !triedSaveWithoutWorkspace && (
+                  <>
+                    {' '}
+                    <span style={{ color: '#5e6c84', fontStyle: 'italic' }}>
+                      (required)
+                    </span>
+                  </>
+                )}
+              </p>
+            </Field>
+
             <Field label="API token" htmlFor="bb-token">
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 <input
@@ -564,13 +629,6 @@ export function App() {
                 </button>
                 {validationIcon(validationState)}
               </div>
-              <p style={helpStyle}>
-                Generate one in your Atlassian account settings.{' '}
-                <a href={TOKEN_HELP_URL} target="_blank" rel="noopener noreferrer">
-                  Open API tokens page
-                </a>
-                .
-              </p>
             </Field>
 
             <div style={{ marginTop: 12, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -653,69 +711,88 @@ export function App() {
               </div>
             </div>
 
-            <Field
-              label={
-                <>
-                  Workspace slug{' '}
-                  <span aria-hidden="true" style={{ color: '#dc2626' }}>
-                    *
-                  </span>
-                  <span className="sr-only"> (required)</span>
-                </>
-              }
-              htmlFor="workspace-slug"
+            {/* ── Branch popover avatars ─────────────────────────────────
+                Jira's native dev-info hover card collapses everything past
+                the first 2 reviewers into a "+N" chip. The toggle below
+                lets the content script extend the popover with extra
+                approver avatars up to the cap, so users see who actually
+                signed off without opening the PR. */}
+            <div
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 24,
+                alignItems: 'flex-start',
+                marginTop: 8,
+              }}
             >
-              <input
-                id="workspace-slug"
-                ref={workspaceSlugInputRef}
-                type="text"
-                value={settings.workspaceSlug}
-                onChange={(e) =>
-                  setSettings({
-                    ...settings,
-                    workspaceSlug: e.target.value,
-                  })
-                }
-                placeholder="your-workspace-slug"
-                spellCheck={false}
-                aria-required="true"
-                aria-label="Workspace slug *"
-                aria-invalid={
-                  workspaceSlugMissing && triedSaveWithoutWorkspace ? true : undefined
-                }
-                aria-describedby="workspace-slug-help"
-                style={{
-                  ...textInputStyle,
-                  ...(workspaceSlugMissing && triedSaveWithoutWorkspace
-                    ? { borderColor: '#fca5a5' }
-                    : {}),
-                }}
-              />
-              {workspaceSlugMissing && triedSaveWithoutWorkspace && (
-                <p
-                  role="alert"
-                  style={{ ...helpStyle, color: '#bf2600' }}
+              <div style={{ flex: 1, minWidth: 280 }}>
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: '#172B4D',
+                    cursor: 'pointer',
+                  }}
                 >
-                  Workspace slug is required.
+                  <input
+                    id="expand-branch-card-avatars"
+                    type="checkbox"
+                    checked={settings.expandBranchCardAvatars}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        expandBranchCardAvatars: e.target.checked,
+                      })
+                    }
+                  />
+                  Expand branch popover avatars
+                </label>
+                <p style={helpStyle}>
+                  When you hover a card's branch indicator, replace Jira's
+                  "+N" overflow chip with up to {settings.branchCardAvatarCap}{' '}
+                  approver avatars (approved-first). Disable to leave Jira's
+                  default popover untouched.
                 </p>
-              )}
-              <p id="workspace-slug-help" style={helpStyle}>
-                <strong>Required.</strong> Find your workspace slug at the top of{' '}
-                <code>bitbucket.org</code> after login, or in any Bitbucket URL between{' '}
-                <code>bitbucket.org/</code> and the next slash (e.g.{' '}
-                <code>bitbucket.org/your-workspace/your-repo</code> →{' '}
-                <code>your-workspace</code>). The Required approvers search needs this to
-                find members.
-                {workspaceSlugMissing && !triedSaveWithoutWorkspace && (
-                  <>
-                    {' '}
-                    <span style={{ color: '#5e6c84', fontStyle: 'italic' }}>
-                      (required)
-                    </span>
-                  </>
-                )}
-              </p>
-            </Field>
+              </div>
+
+              <div style={{ width: 180, flexShrink: 0 }}>
+                <Field label="Avatar cap" htmlFor="branch-card-avatar-cap">
+                  <input
+                    id="branch-card-avatar-cap"
+                    type="number"
+                    min={BRANCH_CARD_AVATAR_CAP_MIN}
+                    max={BRANCH_CARD_AVATAR_CAP_MAX}
+                    step={1}
+                    disabled={!settings.expandBranchCardAvatars}
+                    value={
+                      Number.isFinite(settings.branchCardAvatarCap)
+                        ? settings.branchCardAvatarCap
+                        : ''
+                    }
+                    onChange={(e) => {
+                      const next =
+                        e.target.value === '' ? NaN : Number(e.target.value);
+                      setSettings({ ...settings, branchCardAvatarCap: next });
+                    }}
+                    style={{
+                      ...textInputStyle,
+                      width: 100,
+                      ...(settings.expandBranchCardAvatars
+                        ? {}
+                        : { opacity: 0.6, cursor: 'not-allowed' }),
+                    }}
+                  />
+                  <p style={helpStyle}>
+                    {BRANCH_CARD_AVATAR_CAP_MIN}–{BRANCH_CARD_AVATAR_CAP_MAX}.
+                    Includes the 2 Jira already shows.
+                  </p>
+                </Field>
+              </div>
+            </div>
           </Section>
 
           {/* ── Card colors ───────────────────────────────────────────── */}

@@ -25,6 +25,8 @@
  * On save we always write v3.
  */
 
+import { isExtensionContextValid, warnOnce } from './log';
+
 const SETTINGS_SCHEMA_VERSION = 3 as const;
 const CREDENTIALS_SCHEMA_VERSION = 1 as const;
 const IDENTITY_SCHEMA_VERSION = 1 as const;
@@ -72,6 +74,21 @@ export type Settings = {
     yellow: string;
     red: string;
   };
+  /**
+   * Branch-card hover popover enrichment kill-switch. When `true` the
+   * content script extends Jira's native dev-info popover with extra
+   * approver avatars (up to `branchCardAvatarCap`); when `false` we leave
+   * Jira's default 2 + "+N" overflow chip untouched.
+   */
+  expandBranchCardAvatars: boolean;
+  /**
+   * Total number of avatars to render in the dev-info popover when
+   * enrichment is enabled. Includes the avatars Jira already paints (its
+   * default of 2), so a cap of 5 means up to 3 extra avatars are added on
+   * top of Jira's pair. Clamped to [BRANCH_CARD_AVATAR_CAP_MIN,
+   * BRANCH_CARD_AVATAR_CAP_MAX] on every load.
+   */
+  branchCardAvatarCap: number;
 };
 
 export type Credentials = {
@@ -104,11 +121,13 @@ export const DEFAULT_SETTINGS: Settings = {
   approvers: [],
   workspaceSlug: '',
   colors: {
-    // Tailwind 100s — soft pastel backgrounds.
-    green: '#dcfce7',
-    yellow: '#fef9c3',
-    red: '#fee2e2',
+    // Tailwind 600s — muted primaries.
+    green: '#16a34a',
+    yellow: '#ca8a04',
+    red: '#dc2626',
   },
+  expandBranchCardAvatars: true,
+  branchCardAvatarCap: 5,
 };
 
 export const DEFAULT_CREDENTIALS: Credentials = {
@@ -121,6 +140,17 @@ export const DEFAULT_IDENTITY: Identity | null = null;
 
 export const MIN_APPROVALS_MIN = 1;
 export const MIN_APPROVALS_MAX = 10;
+
+/**
+ * Bounds for `Settings.branchCardAvatarCap`. The lower bound is 3 (Jira
+ * already paints 2; capping below 3 would mean we never render even one
+ * extra avatar, which would be indistinguishable from disabling the
+ * feature). The upper bound is 10 to keep the popover from getting absurdly
+ * wide on long approver lists. Values outside this range are clamped on
+ * load — see `mergeSettings`.
+ */
+export const BRANCH_CARD_AVATAR_CAP_MIN = 3;
+export const BRANCH_CARD_AVATAR_CAP_MAX = 10;
 
 const SETTINGS_KEY = 'settings';
 const CREDENTIALS_KEY = 'credentials';
@@ -136,29 +166,73 @@ const LEGACY_APPROVERS_KEY = ['required', 'Approvers'].join('');
 
 // ─── Settings ────────────────────────────────────────────────────────────────
 
+/**
+ * All seven persistence helpers below share the same defensive shape:
+ *
+ *   1. Probe `isExtensionContextValid()` first. From an orphaned content
+ *      script (extension reloaded via chrome://extensions while the tab
+ *      kept the previous script injected) `browser.storage.X` is unreachable
+ *      — return a sensible default for readers, no-op for writers, instead
+ *      of letting the polyfill blow up with
+ *      "Cannot read properties of undefined (reading 'sync'/'local')".
+ *   2. Wrap the actual `browser.storage.*` call in try/catch. The context
+ *      can become invalidated between the probe and the call — and even
+ *      with a live context, transient storage errors (quota, profile lock)
+ *      shouldn't surface as unhandled promise rejections. On failure: a
+ *      single `warnOnce` line per failure mode, then the same default
+ *      readers got at the gate.
+ *
+ * Callers therefore see a stable contract: `loadSettings` always resolves
+ * to a `Settings`, `loadCredentials` to a `Credentials`, etc. The
+ * "gracefully degraded" path is invisible to consumers — boards just paint
+ * with defaults until the new content script takes over.
+ */
+
 export async function loadSettings(): Promise<Settings> {
-  const raw = await browser.storage.sync.get(SETTINGS_KEY);
-  const stored = raw[SETTINGS_KEY] as Record<string, unknown> | undefined;
-  return mergeSettings(stored);
+  if (!isExtensionContextValid()) return cloneDefaults();
+  try {
+    const raw = await browser.storage.sync.get(SETTINGS_KEY);
+    const stored = raw[SETTINGS_KEY] as Record<string, unknown> | undefined;
+    return mergeSettings(stored);
+  } catch (e) {
+    warnOnce('storage:loadSettings', e);
+    return cloneDefaults();
+  }
 }
 
 export async function saveSettings(settings: Settings): Promise<void> {
+  if (!isExtensionContextValid()) return;
   // Always force the current schema version on save.
   const toWrite: Settings = { ...settings, version: SETTINGS_SCHEMA_VERSION };
-  await browser.storage.sync.set({ [SETTINGS_KEY]: toWrite });
+  try {
+    await browser.storage.sync.set({ [SETTINGS_KEY]: toWrite });
+  } catch (e) {
+    warnOnce('storage:saveSettings', e);
+  }
 }
 
 // ─── Credentials ─────────────────────────────────────────────────────────────
 
 export async function loadCredentials(): Promise<Credentials> {
-  const raw = await browser.storage.local.get(CREDENTIALS_KEY);
-  const stored = raw[CREDENTIALS_KEY] as Partial<Credentials> | undefined;
-  return mergeCredentials(stored);
+  if (!isExtensionContextValid()) return { ...DEFAULT_CREDENTIALS };
+  try {
+    const raw = await browser.storage.local.get(CREDENTIALS_KEY);
+    const stored = raw[CREDENTIALS_KEY] as Partial<Credentials> | undefined;
+    return mergeCredentials(stored);
+  } catch (e) {
+    warnOnce('storage:loadCredentials', e);
+    return { ...DEFAULT_CREDENTIALS };
+  }
 }
 
 export async function saveCredentials(credentials: Credentials): Promise<void> {
+  if (!isExtensionContextValid()) return;
   const toWrite: Credentials = { ...credentials, version: CREDENTIALS_SCHEMA_VERSION };
-  await browser.storage.local.set({ [CREDENTIALS_KEY]: toWrite });
+  try {
+    await browser.storage.local.set({ [CREDENTIALS_KEY]: toWrite });
+  } catch (e) {
+    warnOnce('storage:saveCredentials', e);
+  }
 }
 
 /**
@@ -167,17 +241,24 @@ export async function saveCredentials(credentials: Credentials): Promise<void> {
  * around would let the next connected user inherit a stale ConnectedCard.
  */
 export async function clearCredentials(): Promise<void> {
-  await browser.storage.local.remove(CREDENTIALS_KEY);
+  if (!isExtensionContextValid()) return;
+  try {
+    await browser.storage.local.remove(CREDENTIALS_KEY);
+  } catch (e) {
+    warnOnce('storage:clearCredentials', e);
+  }
   await clearIdentity();
 }
 
 // ─── Identity ────────────────────────────────────────────────────────────────
 
 export async function loadIdentity(): Promise<Identity | null> {
+  if (!isExtensionContextValid()) return null;
   let raw: Record<string, unknown>;
   try {
     raw = await browser.storage.local.get(IDENTITY_KEY);
-  } catch {
+  } catch (e) {
+    warnOnce('storage:loadIdentity', e);
     return null;
   }
   const stored = raw[IDENTITY_KEY] as Partial<Identity> | undefined;
@@ -198,12 +279,22 @@ export async function loadIdentity(): Promise<Identity | null> {
 }
 
 export async function saveIdentity(i: Identity): Promise<void> {
+  if (!isExtensionContextValid()) return;
   const toWrite: Identity = { ...i, version: IDENTITY_SCHEMA_VERSION };
-  await browser.storage.local.set({ [IDENTITY_KEY]: toWrite });
+  try {
+    await browser.storage.local.set({ [IDENTITY_KEY]: toWrite });
+  } catch (e) {
+    warnOnce('storage:saveIdentity', e);
+  }
 }
 
 export async function clearIdentity(): Promise<void> {
-  await browser.storage.local.remove(IDENTITY_KEY);
+  if (!isExtensionContextValid()) return;
+  try {
+    await browser.storage.local.remove(IDENTITY_KEY);
+  } catch (e) {
+    warnOnce('storage:clearIdentity', e);
+  }
 }
 
 // ─── Merge helpers (schema migration) ────────────────────────────────────────
@@ -251,6 +342,24 @@ function mergeSettings(stored: Record<string, unknown> | undefined): Settings {
 
   const colors = (stored['colors'] || {}) as Record<string, unknown>;
 
+  // Branch-card avatar enrichment (v0.3.6+). Both fields default to the
+  // DEFAULT_SETTINGS values when missing on disk — pre-existing records
+  // load with the feature on and a cap of 5, matching a fresh install.
+  const expandBranchCardAvatars =
+    typeof stored['expandBranchCardAvatars'] === 'boolean'
+      ? (stored['expandBranchCardAvatars'] as boolean)
+      : DEFAULT_SETTINGS.expandBranchCardAvatars;
+
+  const rawCap = stored['branchCardAvatarCap'];
+  let branchCardAvatarCap = DEFAULT_SETTINGS.branchCardAvatarCap;
+  if (typeof rawCap === 'number' && Number.isFinite(rawCap)) {
+    const asInt = Math.round(rawCap);
+    branchCardAvatarCap = Math.max(
+      BRANCH_CARD_AVATAR_CAP_MIN,
+      Math.min(BRANCH_CARD_AVATAR_CAP_MAX, asInt),
+    );
+  }
+
   return {
     version: SETTINGS_SCHEMA_VERSION,
     minApprovals,
@@ -270,6 +379,8 @@ function mergeSettings(stored: Record<string, unknown> | undefined): Settings {
           ? (colors['red'] as string)
           : DEFAULT_SETTINGS.colors.red,
     },
+    expandBranchCardAvatars,
+    branchCardAvatarCap,
   };
 }
 
@@ -278,6 +389,8 @@ function cloneDefaults(): Settings {
     ...DEFAULT_SETTINGS,
     approvers: [],
     colors: { ...DEFAULT_SETTINGS.colors },
+    expandBranchCardAvatars: DEFAULT_SETTINGS.expandBranchCardAvatars,
+    branchCardAvatarCap: DEFAULT_SETTINGS.branchCardAvatarCap,
   };
 }
 

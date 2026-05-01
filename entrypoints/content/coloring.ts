@@ -18,10 +18,6 @@
  *      tagged cards, drop bookkeeping for untagged cards
  *   5. setInterval @ 60s — refresh state for every tagged card, but ONLY if
  *      document.visibilityState === 'visible'. Hidden tab → no API hits.
- *   6. browser.runtime.onMessage handler for the popup-side messages
- *      GET_BOARD_COUNTS and FORCE_REFRESH (sent via tabs.sendMessage; the
- *      worker has its own, separate listener for runtime.sendMessage
- *      messages — the two coexist).
  *
  * v0.3.0 simplification: the author-scope filter (`Settings.scope`) was
  * removed — every Review-column card the board shows is colored. Lead/PM
@@ -44,23 +40,24 @@ import {
   aggregateCardState,
   type CardState,
 } from '../../lib/coloring';
-import type {
-  GetPRStateResponse,
-  GetBoardCountsResponse,
-  ForceRefreshResponse,
-  Message,
-} from '../../lib/messages';
+import type { GetPRStateResponse } from '../../lib/messages';
 import { info } from '../../lib/log';
 import { installStyles, applyColorOverrides } from './style';
 import { findTaggedCards, onCardsChanged } from './observer';
-import { requestPRs, pruneKeys } from './state';
+import {
+  requestPRs,
+  pruneKeys,
+  getCachedCardState,
+  setCachedCardState,
+} from './state';
 import { onStorageChange } from './storageEvents';
 
 const REFRESH_INTERVAL_MS = 60_000;
 
 let currentSettings: Settings | null = null;
 let connected = false;
-const lastLoggedState = new Map<string, CardState>();
+// Per-key last-known CardState lives in ./state.ts so the observer's
+// synchronous fast-path paint can read it before the debounced recolor pass.
 
 /**
  * Public entrypoint — wire up styles, settings, change listeners, and the
@@ -128,9 +125,6 @@ async function initialize(): Promise<void> {
     void recolorAll(/* force */ true);
   }, REFRESH_INTERVAL_MS);
 
-  // Popup → content-script bridge.
-  installPopupBridge();
-
   // First paint pass for whatever the observer has already tagged.
   void recolorAll();
 }
@@ -158,12 +152,10 @@ async function recolorAll(force = false): Promise<void> {
     const key = card.dataset.ejKey;
     if (key) liveKeys.add(key);
   }
+  // pruneKeys also drops cached CardState entries whose key has left the
+  // board, so the per-key last-state cache is kept in lockstep with the
+  // PR-fetch cache and listener registry — no separate sweep needed here.
   pruneKeys(liveKeys);
-  for (const tracked of [...lastLoggedState.keys()]) {
-    if (!liveKeys.has(tracked)) {
-      lastLoggedState.delete(tracked);
-    }
-  }
 
   if (!connected) return;
 
@@ -174,6 +166,19 @@ async function recolorCard(card: HTMLElement, force: boolean): Promise<void> {
   const key = card.dataset.ejKey;
   if (!key) return;
   if (!currentSettings) return;
+
+  // Immediate re-paint from last-known state. When Jira's React replaces a
+  // card element (virtualization remount, lazy-load re-render) the new
+  // element comes back with no data-ej-state, so even though the network
+  // fetch is fast, the user sees a brief gap of "no color". Reapplying the
+  // remembered state here closes that gap — the subsequent fetch may
+  // overwrite with a fresher value, but the card never visibly loses color.
+  // The same cache is also consulted by observer.ts's synchronous fast-path
+  // paint, which beats this code path to the punch on virtualized remounts.
+  const lastKnown = getCachedCardState(key);
+  if (lastKnown !== undefined && card.dataset.ejState !== lastKnown) {
+    card.dataset.ejState = lastKnown;
+  }
 
   const response: GetPRStateResponse = await requestPRs(
     key,
@@ -196,81 +201,9 @@ async function recolorCard(card: HTMLElement, force: boolean): Promise<void> {
     card.dataset.ejState = state;
   }
 
-  if (lastLoggedState.get(key) !== state) {
+  if (getCachedCardState(key) !== state) {
     info(`colored ${key} → ${state}`);
-    lastLoggedState.set(key, state);
+    setCachedCardState(key, state);
   }
 }
 
-// ─── Popup bridge ───────────────────────────────────────────────────────────
-
-/**
- * Listen for the popup-only message types (GET_BOARD_COUNTS, FORCE_REFRESH).
- * These are dispatched via `browser.tabs.sendMessage(tabId, ...)`, which
- * routes to the content script's `runtime.onMessage` listener — distinct
- * from the worker's listener, which only sees `runtime.sendMessage` traffic.
- */
-function installPopupBridge(): void {
-  browser.runtime.onMessage.addListener(
-    (raw, _sender): undefined | Promise<GetBoardCountsResponse | ForceRefreshResponse> => {
-      const msg = raw as Message;
-      if (msg.type === 'GET_BOARD_COUNTS') {
-        return Promise.resolve(computeBoardCounts());
-      }
-      if (msg.type === 'FORCE_REFRESH') {
-        return forceRefreshAll();
-      }
-      // Not for us — let other listeners (or the worker) handle it.
-      return undefined;
-    },
-  );
-}
-
-function computeBoardCounts(): GetBoardCountsResponse {
-  const counts: GetBoardCountsResponse = {
-    green: 0,
-    yellow: 0,
-    red: 0,
-    noPr: 0,
-    error: 0,
-    unknown: 0,
-    total: 0,
-  };
-  for (const card of findTaggedCards()) {
-    counts.total += 1;
-    const state = card.dataset.ejState;
-    switch (state) {
-      case 'green':
-        counts.green += 1;
-        break;
-      case 'yellow':
-        counts.yellow += 1;
-        break;
-      case 'red':
-        counts.red += 1;
-        break;
-      case 'no-pr':
-        counts.noPr += 1;
-        break;
-      case 'error':
-        counts.error += 1;
-        break;
-      default:
-        counts.unknown += 1;
-        break;
-    }
-  }
-  return counts;
-}
-
-async function forceRefreshAll(): Promise<ForceRefreshResponse> {
-  const cards = findTaggedCards();
-  // Wipe content-side cooldowns so requestPRs hits the worker.
-  // pruneKeys with an empty set drops everything.
-  pruneKeys(new Set());
-  // Reset per-key state-change logging so a force refresh reports current
-  // state freshly.
-  lastLoggedState.clear();
-  await recolorAll(/* force */ true);
-  return { ok: true, refreshed: cards.length };
-}

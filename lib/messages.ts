@@ -22,11 +22,7 @@ export type Message =
   | { type: 'GET_PR_STATE'; key: string; tenant: string }
   | { type: 'VALIDATE_USERNAME'; username: string }
   | { type: 'GET_WORKSPACE_MEMBERS'; workspaceSlug: string }
-  | { type: 'RUN_DIAGNOSTICS'; credentials: Credentials; workspaceSlug: string }
-  // Popup ↔ content-script messages. Sent via browser.tabs.sendMessage(tabId, ...);
-  // do NOT route through the worker.
-  | { type: 'GET_BOARD_COUNTS' }
-  | { type: 'FORCE_REFRESH' };
+  | { type: 'RUN_DIAGNOSTICS'; credentials: Credentials; workspaceSlug: string };
 
 /**
  * Per-probe outcome for the v0.3.3 diagnostics suite. The Test connection
@@ -62,24 +58,6 @@ export type DiagnosticsResponse =
   | { ok: false; error: string; results?: ProbeResult[] };
 
 export type PingResponse = { ok: true; time: number };
-
-/**
- * Counts of currently-tagged Review-column cards bucketed by their
- * `data-ej-state`. Sum of (green + yellow + red + noPr + error + unknown)
- * equals `total`.
- */
-export type GetBoardCountsResponse = {
-  green: number;
-  yellow: number;
-  red: number;
-  noPr: number;
-  error: number;
-  unknown: number;
-  total: number;
-};
-
-/** Ack for FORCE_REFRESH — `refreshed` is the count of cards re-fetched. */
-export type ForceRefreshResponse = { ok: true; refreshed: number };
 
 /**
  * A single workspace member surfaced by the autocomplete in the options-page
@@ -155,8 +133,4 @@ export type Response<T extends Message> = T extends { type: 'TEST_CONNECTION' }
             ? GetWorkspaceMembersResponse
             : T extends { type: 'RUN_DIAGNOSTICS' }
               ? DiagnosticsResponse
-              : T extends { type: 'GET_BOARD_COUNTS' }
-                ? GetBoardCountsResponse
-                : T extends { type: 'FORCE_REFRESH' }
-                  ? ForceRefreshResponse
-                  : never;
+              : never;

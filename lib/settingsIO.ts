@@ -26,6 +26,8 @@
  */
 
 import {
+  BRANCH_CARD_AVATAR_CAP_MAX,
+  BRANCH_CARD_AVATAR_CAP_MIN,
   DEFAULT_SETTINGS,
   MIN_APPROVALS_MAX,
   MIN_APPROVALS_MIN,
@@ -54,6 +56,8 @@ type ExportShape = {
     yellow: string;
     red: string;
   };
+  expandBranchCardAvatars: boolean;
+  branchCardAvatarCap: number;
 };
 
 /**
@@ -80,6 +84,8 @@ export function serializeSettings(s: Settings): string {
       yellow: s.colors.yellow,
       red: s.colors.red,
     },
+    expandBranchCardAvatars: s.expandBranchCardAvatars,
+    branchCardAvatarCap: s.branchCardAvatarCap,
   };
   return JSON.stringify(payload, null, 2);
 }
@@ -257,6 +263,39 @@ export function parseAndValidateSettings(
     }
   }
 
+  // Branch-card avatar enrichment fields (v0.3.6+). Optional on import — a
+  // legacy v1/v2/v3 export that predates these settings just falls back to
+  // the DEFAULT_SETTINGS values, matching how `mergeSettings` treats them
+  // when the keys are missing on disk.
+  let expandBranchCardAvatars = DEFAULT_SETTINGS.expandBranchCardAvatars;
+  if (o['expandBranchCardAvatars'] !== undefined) {
+    if (typeof o['expandBranchCardAvatars'] !== 'boolean') {
+      return {
+        ok: false,
+        error: 'expandBranchCardAvatars must be a boolean.',
+      };
+    }
+    expandBranchCardAvatars = o['expandBranchCardAvatars'] as boolean;
+  }
+
+  let branchCardAvatarCap = DEFAULT_SETTINGS.branchCardAvatarCap;
+  if (o['branchCardAvatarCap'] !== undefined) {
+    const rawCap = o['branchCardAvatarCap'];
+    if (
+      typeof rawCap !== 'number' ||
+      !Number.isFinite(rawCap) ||
+      !Number.isInteger(rawCap) ||
+      rawCap < BRANCH_CARD_AVATAR_CAP_MIN ||
+      rawCap > BRANCH_CARD_AVATAR_CAP_MAX
+    ) {
+      return {
+        ok: false,
+        error: `branchCardAvatarCap must be an integer between ${BRANCH_CARD_AVATAR_CAP_MIN} and ${BRANCH_CARD_AVATAR_CAP_MAX}.`,
+      };
+    }
+    branchCardAvatarCap = rawCap;
+  }
+
   const settings: Settings = {
     version: 3,
     minApprovals,
@@ -267,6 +306,8 @@ export function parseAndValidateSettings(
       yellow: c['yellow'] as string,
       red: c['red'] as string,
     },
+    expandBranchCardAvatars,
+    branchCardAvatarCap,
   };
 
   // Defensive: if the user somehow saved defaults differently, this still

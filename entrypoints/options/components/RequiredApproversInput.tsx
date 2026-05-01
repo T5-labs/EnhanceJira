@@ -348,7 +348,15 @@ export function RequiredApproversInput({
         <input
           type="text"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            // Re-open the dropdown on any keystroke. After picking a member,
+            // `addFromMember` closes the dropdown but the input keeps focus
+            // (via the row's onMouseDown preventDefault), so subsequent typing
+            // would otherwise leave `searchOpen = false` and hide all results
+            // until the user manually re-focused the input.
+            setSearchOpen(true);
+          }}
           onFocus={() => setSearchOpen(true)}
           onBlur={() => {
             // Defer so click on a dropdown row registers before we hide it.

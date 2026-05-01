@@ -1,7 +1,7 @@
 import { startBoardWatcher } from './content/observer';
 import { startColoring } from './content/coloring';
-import { startTooltip } from './content/tooltip';
 import { startBanner } from './content/banner';
+import { startBranchHoverCard } from './content/branchHoverCard';
 import { info } from '../lib/log';
 
 export default defineContentScript({
@@ -10,7 +10,7 @@ export default defineContentScript({
     info('content script alive on', location.href);
     void startBoardWatcher();
     startColoring();
-    startTooltip();
     startBanner();
+    startBranchHoverCard();
   },
 });

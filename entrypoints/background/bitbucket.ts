@@ -607,8 +607,14 @@ function mapParticipant(p: unknown): Reviewer | null {
       ? user.links.avatar.href
       : '';
   const role: Reviewer['role'] = obj.role === 'REVIEWER' ? 'REVIEWER' : 'PARTICIPANT';
-  const approved = obj.approved === true;
-  const changesRequested = obj.state === 'changes_requested';
+  // Bitbucket participant `state` varies across API versions / Server vs. Cloud:
+  // "approved", "changes_requested" (Cloud), "needs_work" (Server/legacy), or
+  // null/missing (pending). Lowercase before comparing for safety.
+  const stateStr =
+    typeof obj.state === 'string' ? obj.state.toLowerCase() : '';
+  const approved = obj.approved === true || stateStr === 'approved';
+  const changesRequested =
+    stateStr === 'changes_requested' || stateStr === 'needs_work';
 
   return { username, displayName, avatarUrl, role, approved, changesRequested };
 }

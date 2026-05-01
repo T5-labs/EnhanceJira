@@ -7,7 +7,7 @@
  *
  * Lifecycle:
  *   - 200ms hover delay before show (ignore drive-by mouseovers)
- *   - 100ms leave grace before hide (allow user to move from card → tooltip
+ *   - 80ms leave grace before hide (allow user to move from card → tooltip
  *     without dismissing — the tooltip is interactive: it has a clickable PR
  *     link the user may want to reach)
  *   - ESC dismisses immediately
@@ -20,7 +20,11 @@
  */
 
 import type { PRState, Reviewer } from '../../lib/bitbucket';
-import { aggregateCardState, type CardState } from '../../lib/coloring';
+import {
+  aggregateCardState,
+  deriveCardStateForPR,
+  type CardState,
+} from '../../lib/coloring';
 import {
   loadSettings,
   type Settings,
@@ -31,7 +35,11 @@ import { getCachedPRs, requestPRs, subscribeToKey } from './state';
 import { onStorageChange } from './storageEvents';
 
 const SHOW_DELAY_MS = 200;
-const HIDE_GRACE_MS = 100;
+// Tightened from 100ms to 80ms — the previous delay let the tooltip linger
+// noticeably after mouseleave. 80ms is still long enough for a card→tooltip
+// transit (handled separately by the tooltip's own mouseenter cancelHide
+// path) but short enough that an off-board mouse exit feels responsive.
+const HIDE_GRACE_MS = 80;
 const TOOLTIP_ID = 'ej-tooltip';
 const STYLE_ID = 'ej-tooltip-styles';
 
@@ -62,20 +70,29 @@ const TOOLTIP_CSS = `
 #${TOOLTIP_ID} .ej-title-link { display: inline-flex; align-items: baseline; gap: 4px; }
 #${TOOLTIP_ID} .ej-ext-icon { font-size: 11px; opacity: 0.7; }
 #${TOOLTIP_ID} .ej-summary { font-size: 12px; color: #5e6c84; margin: 0 0 6px 0; }
-#${TOOLTIP_ID} .ej-build {
+#${TOOLTIP_ID} .ej-status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px 0;
+}
+#${TOOLTIP_ID} .ej-status-row .ej-summary { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#${TOOLTIP_ID} .ej-state {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
+  gap: 3px;
+  padding: 2px 6px;
   border-radius: 3px;
   font-size: 11px;
   font-weight: 600;
-  margin-bottom: 6px;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
-#${TOOLTIP_ID} .ej-build-success    { background: #e3fcef; color: #006644; }
-#${TOOLTIP_ID} .ej-build-failed     { background: #ffebe6; color: #bf2600; }
-#${TOOLTIP_ID} .ej-build-inprogress { background: #fffae6; color: #974f0c; }
-#${TOOLTIP_ID} .ej-build-stopped    { background: #ebecf0; color: #42526e; }
+#${TOOLTIP_ID} .ej-state-success { background: #e3fcef; color: #006644; }
+#${TOOLTIP_ID} .ej-state-warning { background: #fffae6; color: #974f0c; }
+#${TOOLTIP_ID} .ej-state-failure { background: #ffebe6; color: #bf2600; }
+#${TOOLTIP_ID} .ej-state-unknown { background: #ebecf0; color: #42526e; }
 #${TOOLTIP_ID} .ej-divider { border: 0; border-top: 1px solid #dfe1e6; margin: 8px 0; }
 #${TOOLTIP_ID} .ej-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: 12px; }
 #${TOOLTIP_ID} .ej-row-icon { width: 14px; text-align: center; flex: 0 0 14px; }
@@ -408,9 +425,19 @@ function renderLoaded(prs: PRState[]): void {
     const title = document.createElement('div');
     title.className = 'ej-title';
     const headline = `${pr.key} ${pr.title}`.trim();
-    const authorSuffix = pr.authorUsername
-      ? ` — by ${pr.authorDisplayName || pr.authorUsername} (@${pr.authorUsername})`
-      : '';
+    // Match the reviewer/participant rule: never echo a `{uuid}` username
+    // into the visible byline. If we only have the uuid fallback, drop the
+    // `(@…)` parenthetical and lean on the display name (task b).
+    const authorIsUuid = isUuidUsername(pr.authorUsername);
+    let authorSuffix = '';
+    if (pr.authorUsername) {
+      const visibleName = pr.authorDisplayName || (authorIsUuid ? '' : pr.authorUsername);
+      if (visibleName && !authorIsUuid) {
+        authorSuffix = ` — by ${visibleName} (@${pr.authorUsername})`;
+      } else if (visibleName) {
+        authorSuffix = ` — by ${visibleName}`;
+      }
+    }
     const headlineWithAuthor = `${headline}${authorSuffix}`;
     if (pr.url) {
       const a = document.createElement('a');
@@ -440,6 +467,13 @@ function renderLoaded(prs: PRState[]): void {
       0,
     );
     const reviewerCount = pr.reviewers.length;
+
+    // Status row: approval-count summary on the LEFT, card-state badge on
+    // the RIGHT. Single flex parent with justify-between so the two halves
+    // hug the tooltip's edges (task g).
+    const statusRow = document.createElement('div');
+    statusRow.className = 'ej-status-row';
+
     const summaryLine = document.createElement('div');
     summaryLine.className = 'ej-summary';
     const parts: string[] = [`${approvedCount} / ${reviewerCount} approved`];
@@ -449,12 +483,13 @@ function renderLoaded(prs: PRState[]): void {
       );
     }
     summaryLine.textContent = parts.join(' · ');
-    block.appendChild(summaryLine);
+    statusRow.appendChild(summaryLine);
 
-    // Build state badge.
-    if (pr.buildState) {
-      block.appendChild(buildBadgeEl(pr.buildState));
-    }
+    // State badge — driven by the actual per-PR card state so the label
+    // matches the card's color (task c). Falls back to "UNKNOWN" if we
+    // somehow can't compute (e.g. settings still loading on first hover).
+    statusRow.appendChild(stateBadgeEl(pr));
+    block.appendChild(statusRow);
 
     // Reviewers.
     if (pr.reviewers.length > 0) {
@@ -486,30 +521,54 @@ function renderLoaded(prs: PRState[]): void {
   });
 }
 
-function buildBadgeEl(
-  state: NonNullable<PRState['buildState']>,
-): HTMLElement {
+/**
+ * Card-state-aware badge for the status row. Maps the per-PR card state
+ * (green/yellow/red) to a human label and a matching color. Red was
+ * renamed from "FAILURE" to "Changes Requested" to better reflect the
+ * approval-state semantics (a red card means a reviewer requested changes,
+ * not a CI failure). Falls back to UNKNOWN when settings haven't loaded
+ * yet — this only happens on the very first hover before async settings
+ * resolve, after which the subscription re-renders with the real label.
+ */
+function stateBadgeEl(pr: PRState): HTMLElement {
   const el = document.createElement('div');
-  el.className = 'ej-build';
+  el.className = 'ej-state';
+
+  if (!currentSettings) {
+    el.classList.add('ej-state-unknown');
+    el.textContent = 'UNKNOWN';
+    return el;
+  }
+
+  const state = deriveCardStateForPR(pr, currentSettings);
   switch (state) {
-    case 'SUCCESS':
-      el.classList.add('ej-build-success');
+    case 'green':
+      el.classList.add('ej-state-success');
       el.textContent = '✓ SUCCESS';
       break;
-    case 'FAILED':
-      el.classList.add('ej-build-failed');
-      el.textContent = '✗ FAILED';
+    case 'yellow':
+      el.classList.add('ej-state-warning');
+      el.textContent = '⚠ WARNING';
       break;
-    case 'INPROGRESS':
-      el.classList.add('ej-build-inprogress');
-      el.textContent = '⏳ INPROGRESS';
-      break;
-    case 'STOPPED':
-      el.classList.add('ej-build-stopped');
-      el.textContent = '⊘ STOPPED';
+    case 'red':
+      el.classList.add('ej-state-failure');
+      el.textContent = '✗ Changes Requested';
       break;
   }
   return el;
+}
+
+/**
+ * On legacy Bitbucket workspaces `participants[].user.username` may be
+ * absent and the worker falls back to `user.uuid` — a string of the form
+ * `{19420924-b4b4-4baa-9099-ed07361d1e6d}`. The UUID is preserved in the
+ * `Reviewer.username` field for matching/identity (required-approver
+ * comparisons, etc.), but it should never appear in the visible tooltip
+ * handle. This helper detects the UUID shape so we can suppress the
+ * `@{...}` handle without touching the underlying data.
+ */
+function isUuidUsername(username: string): boolean {
+  return /^\{[0-9a-fA-F-]+\}$/.test(username);
 }
 
 function reviewerRowEl(r: Reviewer): HTMLElement {
@@ -537,10 +596,13 @@ function reviewerRowEl(r: Reviewer): HTMLElement {
   name.textContent = r.displayName || r.username;
   row.appendChild(name);
 
-  const handle = document.createElement('span');
-  handle.className = 'ej-handle';
-  handle.textContent = `@${r.username}`;
-  row.appendChild(handle);
+  // Suppress `@{uuid}` handles — only show real usernames (task b).
+  if (!isUuidUsername(r.username)) {
+    const handle = document.createElement('span');
+    handle.className = 'ej-handle';
+    handle.textContent = `@${r.username}`;
+    row.appendChild(handle);
+  }
 
   return row;
 }
@@ -561,10 +623,13 @@ function participantRowEl(r: Reviewer): HTMLElement {
   name.textContent = r.displayName || r.username;
   row.appendChild(name);
 
-  const handle = document.createElement('span');
-  handle.className = 'ej-handle';
-  handle.textContent = `@${r.username}`;
-  row.appendChild(handle);
+  // Suppress `@{uuid}` handles — only show real usernames (task b).
+  if (!isUuidUsername(r.username)) {
+    const handle = document.createElement('span');
+    handle.className = 'ej-handle';
+    handle.textContent = `@${r.username}`;
+    row.appendChild(handle);
+  }
 
   return row;
 }

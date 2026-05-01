@@ -16,6 +16,7 @@
  */
 
 import type { GetPRStateResponse } from '../../lib/messages';
+import type { CardState } from '../../lib/coloring';
 import { error as logError } from '../../lib/log';
 
 const PER_KEY_FETCH_COOLDOWN_MS = 10_000;
@@ -27,6 +28,38 @@ type CacheEntry =
 const cache = new Map<string, CacheEntry>();
 const inFlight = new Map<string, Promise<GetPRStateResponse>>();
 const lastFetchAt = new Map<string, number>();
+
+/**
+ * Per-key last-known CardState cache. Keyed by Jira ticket key (string), so it
+ * survives Jira's virtualization unmount/remount cycles within the same
+ * session — a card scrolled out of view and back in is the same key, so the
+ * cached state is still applicable.
+ *
+ * Lives here (not in coloring.ts) because the observer's synchronous fast-path
+ * paint reads it during the MutationObserver callback, before the debounced
+ * recolor pass runs. See `observer.ts` `runFastPathPaint` for the read site.
+ */
+const lastCardState = new Map<string, CardState>();
+
+/** Read the last-known CardState for a Jira key, or undefined if uncached. */
+export function getCachedCardState(key: string): CardState | undefined {
+  return lastCardState.get(key);
+}
+
+/** Record the last-known CardState for a Jira key. */
+export function setCachedCardState(key: string, state: CardState): void {
+  lastCardState.set(key, state);
+}
+
+/** Drop the cached CardState for a Jira key (used when key leaves the board). */
+export function deleteCachedCardState(key: string): void {
+  lastCardState.delete(key);
+}
+
+/** Iterate the keys that currently have a cached CardState. */
+export function cachedCardStateKeys(): IterableIterator<string> {
+  return lastCardState.keys();
+}
 
 type Listener = (response: GetPRStateResponse) => void;
 const listeners = new Map<string, Set<Listener>>();
@@ -131,8 +164,28 @@ export function requestPRs(
 }
 
 /**
- * Drop bookkeeping for keys no longer on the board. Called by coloring after
- * each tag-pass with the live key set.
+ * Drop bookkeeping for keys not currently visible on the board. Called by
+ * coloring after each tag-pass with the live key set.
+ *
+ * IMPORTANT: `lastCardState` is intentionally NOT pruned here. Jira virtualizes
+ * off-screen cards: a card scrolled out of view leaves the DOM (so its key
+ * leaves `liveKeys`), then re-mounts when scrolled back. If we dropped its
+ * cached CardState on every unmount, the observer's synchronous fast-path
+ * paint would have nothing to apply on remount and the card would flash its
+ * default color until the network fetch settled — exactly the user-visible
+ * scroll-flicker bug. Letting `lastCardState` outlive scroll-driven unmounts
+ * is the whole point of keying by string Jira-key rather than DOM element.
+ *
+ * The fetch cache, cooldown map, and per-key listener registry ARE pruned
+ * (those resources have real cost — bytes per cached PRState[], in-flight
+ * Promise chains, listener closures), and a card moved out of Review for real
+ * (different column, deleted issue) won't re-enter the Review column again
+ * during this session. If it ever does, a stale CardState in the cache is
+ * fine — the next fetch result overwrites it via `setCachedCardState`.
+ *
+ * In the worst case, `lastCardState` grows to one entry per Jira key seen
+ * in Review during the session — kilobytes at most for a busy board, freed
+ * on the next page navigation or reload.
  */
 export function pruneKeys(liveKeys: Set<string>): void {
   for (const k of cache.keys()) {
@@ -144,4 +197,5 @@ export function pruneKeys(liveKeys: Set<string>): void {
   for (const k of listeners.keys()) {
     if (!liveKeys.has(k)) listeners.delete(k);
   }
+  // lastCardState is deliberately NOT pruned here — see header comment.
 }

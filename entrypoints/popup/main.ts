@@ -1,210 +1,123 @@
 /**
- * Popup dashboard — small live view over the active Jira tab.
+ * Popup card — minimal launcher for the extension.
  *
- * Three states:
- *   1. Not on a Jira board tab   → "Open a Jira board to see status"
- *   2. On a Jira board, no token → "Not connected"
- *   3. On a Jira board, connected → green / yellow / red counts + Refresh
+ * Renders a single horizontal row: title "EnhanceJira", version number
+ * (read from `chrome.runtime.getManifest().version` at runtime), and a
+ * settings (gear) icon on the far right that opens the options page.
  *
- * The counts are sourced directly from the content script's tagged-card
- * DOM via `tabs.sendMessage(GET_BOARD_COUNTS)`. The popup itself is
- * stateless — it queries on open, queries again after every Refresh, and
- * unloads when closed. No background polling, no cached state.
- *
- * Vanilla TS DOM. No React. ~280px wide. System font.
+ * No counts, no state branching, no auto-fetch — disconnect lives on the
+ * options page now. Vanilla TS DOM. No React. ~240px wide. System font.
  */
 
-import { clearCredentials, loadCredentials } from '../../lib/settings';
-import type {
-  GetBoardCountsResponse,
-  ForceRefreshResponse,
-} from '../../lib/messages';
-
-const JIRA_BOARD_URL_RE = /^https:\/\/[^/]+\.atlassian\.net\/jira\/software\//;
-
-type Tab = { id?: number; url?: string };
+const version = browser.runtime.getManifest().version;
 
 document.body.innerHTML = `
   <div class="ej-popup">
     <header class="ej-popup-header">
-      <strong>EnhanceJira</strong>
+      <div class="ej-brand">
+        <span class="ej-title">EnhanceJira</span>
+        <span class="ej-version">v${escapeHtml(version)}</span>
+      </div>
+      <span class="ej-divider" aria-hidden="true"></span>
+      <button type="button" class="ej-icon-btn" id="ej-settings" aria-label="Open settings" title="Settings">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+      </button>
     </header>
-    <hr class="ej-popup-divider" />
-    <section class="ej-popup-body" id="ej-popup-body">
-      <div class="ej-popup-loading">Loading…</div>
-    </section>
-    <footer class="ej-popup-footer">
-      <button type="button" class="ej-link" id="ej-settings">Settings</button>
-      <span class="ej-sep">·</span>
-      <button type="button" class="ej-link" id="ej-disconnect">Disconnect</button>
-    </footer>
   </div>
 `;
 
 injectStyles();
-wireFooter();
-void render();
+wireSettings();
 
 function injectStyles(): void {
   const style = document.createElement('style');
   style.textContent = `
-    html, body { margin: 0; padding: 0; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #0f0f11;
+      width: fit-content;
+    }
     .ej-popup {
-      width: 280px;
-      padding: 12px;
+      width: fit-content;
+      min-width: 170px;
+      padding: 11px 13px;
       box-sizing: border-box;
       font: 13px system-ui, -apple-system, "Segoe UI", sans-serif;
-      color: #172b4d;
+      color: #f4f5f7;
+      background: #0f0f11;
+      backdrop-filter: blur(3px);
+      -webkit-backdrop-filter: blur(3px);
     }
-    .ej-popup-header { font-size: 14px; font-weight: 600; }
-    .ej-popup-divider { border: 0; border-top: 1px solid #dfe1e6; margin: 8px 0; }
-    .ej-popup-body { min-height: 60px; }
-    .ej-popup-loading { color: #5e6c84; font-size: 12px; }
-    .ej-counts {
-      display: flex;
-      gap: 16px;
+    .ej-popup-header {
+      display: inline-flex;
       align-items: center;
-      font-size: 14px;
-      margin-bottom: 12px;
+      gap: 10px;
     }
-    .ej-count { display: inline-flex; align-items: center; gap: 4px; }
-    .ej-dot {
-      width: 10px; height: 10px; border-radius: 50%;
+    .ej-brand {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 6px;
+    }
+    .ej-title {
+      font-size: 16px;
+      font-weight: 400;
+      color: #f4f5f7;
+      line-height: 1;
+    }
+    .ej-version {
+      font-size: 0.8em;
+      color: #8b9099;
+      line-height: 1;
+    }
+    .ej-divider {
       display: inline-block;
+      width: 1px;
+      height: 18px;
+      background: rgba(255, 255, 255, 0.18);
     }
-    .ej-dot-green  { background: #36b37e; }
-    .ej-dot-yellow { background: #f5b500; }
-    .ej-dot-red    { background: #de350b; }
-    .ej-msg { color: #5e6c84; font-size: 12px; margin-bottom: 12px; }
-    .ej-button {
-      width: 100%;
-      padding: 6px 10px;
-      font: inherit;
-      background: #f4f5f7;
-      border: 1px solid #dfe1e6;
-      border-radius: 3px;
-      color: #172b4d;
-      cursor: pointer;
-    }
-    .ej-button:hover:not([disabled]) { background: #ebecf0; }
-    .ej-button[disabled] { opacity: 0.5; cursor: not-allowed; }
-    .ej-popup-footer {
-      margin-top: 12px;
-      padding-top: 8px;
-      border-top: 1px solid #dfe1e6;
-      font-size: 12px;
-      color: #5e6c84;
-    }
-    .ej-link {
-      background: none;
-      border: 0;
+    .ej-icon-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 26px;
       padding: 0;
       margin: 0;
-      font: inherit;
-      color: #0052cc;
+      background: transparent;
+      border: 0;
+      border-radius: 4px;
+      color: #c8cdd3;
       cursor: pointer;
+      transition: background-color 120ms ease, color 120ms ease;
     }
-    .ej-link:hover { text-decoration: underline; }
-    .ej-sep { margin: 0 6px; color: #c1c7d0; }
+    .ej-icon-btn:hover {
+      background: rgba(255, 255, 255, 0.10);
+      color: #ffffff;
+    }
+    .ej-icon-btn:focus-visible {
+      outline: 2px solid #5e9eff;
+      outline-offset: 1px;
+    }
   `;
   document.head.appendChild(style);
 }
 
-function wireFooter(): void {
+function wireSettings(): void {
   const settingsBtn = document.getElementById('ej-settings');
-  const disconnectBtn = document.getElementById('ej-disconnect');
   settingsBtn?.addEventListener('click', () => {
     void browser.runtime.openOptionsPage();
   });
-  disconnectBtn?.addEventListener('click', async () => {
-    await clearCredentials();
-    void browser.runtime.openOptionsPage();
-  });
 }
 
-async function getActiveTab(): Promise<Tab | null> {
-  try {
-    const tabs = await browser.tabs.query({ active: true, currentWindow: true });
-    return tabs[0] ?? null;
-  } catch {
-    return null;
-  }
-}
-
-async function render(): Promise<void> {
-  const body = document.getElementById('ej-popup-body');
-  if (!body) return;
-
-  const tab = await getActiveTab();
-  const isJira = !!tab?.url && JIRA_BOARD_URL_RE.test(tab.url);
-
-  if (!isJira) {
-    body.innerHTML = `
-      <div class="ej-msg">Open a Jira board to see status</div>
-      <button type="button" class="ej-button" id="ej-refresh" disabled>Refresh now</button>
-    `;
-    return;
-  }
-
-  const creds = await loadCredentials();
-  const connected = creds.username.length > 0 && creds.token.length > 0;
-
-  if (!connected) {
-    body.innerHTML = `
-      <div class="ej-msg">Not connected</div>
-      <button type="button" class="ej-button" id="ej-refresh" disabled>Refresh now</button>
-    `;
-    return;
-  }
-
-  // Connected and on a Jira board — fetch counts.
-  const counts = await fetchCounts(tab!);
-  renderCounts(body, counts, tab!);
-}
-
-async function fetchCounts(tab: Tab): Promise<GetBoardCountsResponse | null> {
-  if (typeof tab.id !== 'number') return null;
-  try {
-    const r = (await browser.tabs.sendMessage(tab.id, {
-      type: 'GET_BOARD_COUNTS',
-    })) as GetBoardCountsResponse | undefined;
-    return r ?? null;
-  } catch {
-    // Content script not loaded yet (board page just opened, or different
-    // tenant). Surface as zero counts — the user sees "0 0 0" which honestly
-    // reflects what the extension knows.
-    return null;
-  }
-}
-
-function renderCounts(
-  body: HTMLElement,
-  counts: GetBoardCountsResponse | null,
-  tab: Tab,
-): void {
-  const c = counts ?? { green: 0, yellow: 0, red: 0, noPr: 0, error: 0, unknown: 0, total: 0 };
-  body.innerHTML = `
-    <div class="ej-counts">
-      <span class="ej-count"><span class="ej-dot ej-dot-green"></span>${c.green}</span>
-      <span class="ej-count"><span class="ej-dot ej-dot-yellow"></span>${c.yellow}</span>
-      <span class="ej-count"><span class="ej-dot ej-dot-red"></span>${c.red}</span>
-    </div>
-    <button type="button" class="ej-button" id="ej-refresh">Refresh now</button>
-  `;
-  const btn = document.getElementById('ej-refresh') as HTMLButtonElement | null;
-  if (!btn) return;
-  btn.addEventListener('click', async () => {
-    btn.disabled = true;
-    btn.textContent = 'Refreshing…';
-    try {
-      if (typeof tab.id === 'number') {
-        await browser.tabs.sendMessage(tab.id, {
-          type: 'FORCE_REFRESH',
-        }) as ForceRefreshResponse | undefined;
-      }
-    } catch {
-      // ignore — we just re-render with whatever counts the content script reports
-    }
-    await render();
-  });
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }

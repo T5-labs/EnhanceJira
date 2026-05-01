@@ -72,3 +72,54 @@ export function error(...args: unknown[]): void {
   // eslint-disable-next-line no-console
   console.error(PREFIX, ...args);
 }
+
+/**
+ * Module-local once-set so a given failure mode logs at most one warning per
+ * key per module-load lifetime. Used by storage-access guards to avoid
+ * spamming the console when an orphaned content script fires its observer
+ * over and over after extension reload.
+ */
+const warnOnceSeen = new Set<string>();
+
+/**
+ * Log a `warn` at most once per `key` per page lifetime. The intent is the
+ * same as the local `warnOnce` helpers in observer.ts / branchHoverCard.ts,
+ * but exposed centrally so storage-access call sites can share a single
+ * dedup namespace. Pass a stable, narrow `key` ("storage:loadSettings",
+ * "storage:onChanged-listener") so distinct failure modes still get one
+ * line each.
+ */
+export function warnOnce(key: string, ...args: unknown[]): void {
+  if (warnOnceSeen.has(key)) return;
+  warnOnceSeen.add(key);
+  // eslint-disable-next-line no-console
+  console.warn(PREFIX, key, ...args);
+}
+
+/**
+ * Defensive probe for whether this script's extension context is still
+ * alive. Returns `false` from an orphaned content script (the user reloaded
+ * the extension via chrome://extensions while a tab kept the previous
+ * content script injected) — `chrome.runtime.id` becomes `undefined` in
+ * that state, which trips the `browser?.runtime?.id` chain inside the
+ * bundled webextension-polyfill shim. Storage calls from such a context
+ * either throw or return `undefined`, producing the unhandled-promise
+ * "Cannot read properties of undefined (reading 'local'/'sync'/'onChanged')"
+ * errors visible on the chrome://extensions Errors page.
+ *
+ * Wrapped in try/catch because evaluating `browser.runtime.id` from an
+ * invalidated context can itself throw (the polyfill rebinds the global).
+ *
+ * NB: this is a `false` answer, not a `false-now-but-might-recover`
+ * answer — there's no path back from an invalidated context for THIS
+ * script. The new content script (after the host tab reloads) gets a
+ * fresh context and a fresh module load.
+ */
+export function isExtensionContextValid(): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return Boolean((browser as any)?.runtime?.id);
+  } catch {
+    return false;
+  }
+}

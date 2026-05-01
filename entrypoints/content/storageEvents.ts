@@ -29,7 +29,11 @@ import {
   type Identity,
   type Settings,
 } from '../../lib/settings';
-import { error as logError } from '../../lib/log';
+import {
+  error as logError,
+  isExtensionContextValid,
+  warnOnce,
+} from '../../lib/log';
 
 export type StorageEvent =
   | { type: 'settingsChanged'; settings: Settings }
@@ -56,27 +60,66 @@ function install(): void {
   if (installed) return;
   installed = true;
 
-  browser.storage.onChanged.addListener((changes, area) => {
-    if (area === 'sync' && changes['settings']) {
-      void loadSettings().then((settings) => {
-        emit({ type: 'settingsChanged', settings });
-      });
-      return;
-    }
-    if (area === 'local' && changes['credentials']) {
-      void loadCredentials().then((credentials) => {
-        emit({ type: 'credentialsChanged', credentials });
-      });
-      return;
-    }
-    if (area === 'local' && changes['identity']) {
-      void loadIdentity().then((identity) => {
-        emit({ type: 'identityChanged', identity });
-      });
-      return;
-    }
-    // Other areas / keys: ignored.
-  });
+  // Bail before touching `browser.storage.onChanged` if the extension context
+  // is gone (e.g. an orphaned content script left over from a chrome://
+  // extensions reload). Trying to attach a listener through the polyfill in
+  // that state throws "Cannot read properties of undefined (reading
+  // 'onChanged')". The new content script that runs after the host tab
+  // reloads gets a fresh module load and a live context, so this only
+  // affects the orphaned predecessor.
+  if (!isExtensionContextValid()) {
+    warnOnce('storage:onChanged-install-skipped');
+    return;
+  }
+
+  try {
+    browser.storage.onChanged.addListener((changes, area) => {
+      // The listener body is the second-most-likely place for the orphaned-
+      // context error to surface: the listener may have been attached
+      // successfully by a previously-live context, then fired AFTER the
+      // extension was reloaded, at which point `loadSettings()` (etc.)
+      // tries to touch `browser.storage.sync` on an invalidated context.
+      // Wrap the whole body so the polyfill's unhandled-rejection chain
+      // can't reach the chrome://extensions Errors page.
+      try {
+        if (area === 'sync' && changes['settings']) {
+          void loadSettings()
+            .then((settings) => {
+              emit({ type: 'settingsChanged', settings });
+            })
+            .catch((e) => {
+              warnOnce('storage:onChanged-loadSettings', e);
+            });
+          return;
+        }
+        if (area === 'local' && changes['credentials']) {
+          void loadCredentials()
+            .then((credentials) => {
+              emit({ type: 'credentialsChanged', credentials });
+            })
+            .catch((e) => {
+              warnOnce('storage:onChanged-loadCredentials', e);
+            });
+          return;
+        }
+        if (area === 'local' && changes['identity']) {
+          void loadIdentity()
+            .then((identity) => {
+              emit({ type: 'identityChanged', identity });
+            })
+            .catch((e) => {
+              warnOnce('storage:onChanged-loadIdentity', e);
+            });
+          return;
+        }
+        // Other areas / keys: ignored.
+      } catch (e) {
+        warnOnce('storage:onChanged-listener-body', e);
+      }
+    });
+  } catch (e) {
+    warnOnce('storage:onChanged-addListener', e);
+  }
 }
 
 /**
