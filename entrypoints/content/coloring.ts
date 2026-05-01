@@ -14,8 +14,6 @@
  *          because minApprovals or required approvers changed).
  *        - credentials: flip the "connected" gate so we stop spamming the
  *          worker with GET_PR_STATE messages while disconnected.
- *        - identity: kept for ConnectedCard on the options page; not consumed
- *          here (v0.2.0 author-scope filter was removed in v0.3.0).
  *   4. Subscribe to observer's onCardsChanged hook — fetch + paint newly
  *      tagged cards, drop bookkeeping for untagged cards
  *   5. setInterval @ 60s — refresh state for every tagged card, but ONLY if
@@ -107,8 +105,6 @@ async function initialize(): Promise<void> {
       }
       return;
     }
-    // identityChanged: kept by storageEvents for the ConnectedCard on the
-    // options page; not consumed here in v0.3.0.
   });
 
   // Tag-pass hook: fires AFTER each observer pass so we always know the

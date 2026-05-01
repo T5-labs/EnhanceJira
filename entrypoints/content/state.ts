@@ -61,30 +61,6 @@ export function cachedCardStateKeys(): IterableIterator<string> {
   return lastCardState.keys();
 }
 
-/**
- * Per-key last-known self-status (the connected user's review state for the
- * ticket's PR(s)). Same lifecycle / pruning rules as `lastCardState` — the
- * observer's synchronous fast-path paint reads it on virtualization remount,
- * so we deliberately keep entries across scroll-driven unmounts (see header
- * comment on `lastCardState` and on `pruneKeys`). Values are 'approved',
- * 'changes-requested', or 'none'; 'none' is meaningful (renders no badge but
- * means "we know the user has no action on this ticket"), so the cache stores
- * it explicitly rather than relying on absence.
- */
-export type SelfState = 'approved' | 'changes-requested' | 'none';
-
-const lastCardSelfState = new Map<string, SelfState>();
-
-/** Read the last-known self-status for a Jira key, or undefined if uncached. */
-export function getCachedSelfState(key: string): SelfState | undefined {
-  return lastCardSelfState.get(key);
-}
-
-/** Record the last-known self-status for a Jira key. */
-export function setCachedSelfState(key: string, state: SelfState): void {
-  lastCardSelfState.set(key, state);
-}
-
 type Listener = (response: GetPRStateResponse) => void;
 const listeners = new Map<string, Set<Listener>>();
 

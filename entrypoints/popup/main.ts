@@ -10,11 +10,13 @@
  */
 
 const version = browser.runtime.getManifest().version;
+const iconUrl = browser.runtime.getURL('/icon/32.png');
 
 document.body.innerHTML = `
   <div class="ej-popup">
     <header class="ej-popup-header">
       <div class="ej-brand">
+        <img class="ej-brand-icon" src="${escapeHtml(iconUrl)}" alt="" />
         <span class="ej-title">EnhanceJira</span>
         <span class="ej-version">v${escapeHtml(version)}</span>
       </div>
@@ -38,7 +40,7 @@ function injectStyles(): void {
     html, body {
       margin: 0;
       padding: 0;
-      background: #0f0f11;
+      background: #282828;
       width: fit-content;
     }
     .ej-popup {
@@ -48,9 +50,7 @@ function injectStyles(): void {
       box-sizing: border-box;
       font: 13px system-ui, -apple-system, "Segoe UI", sans-serif;
       color: #f4f5f7;
-      background: #0f0f11;
-      backdrop-filter: blur(3px);
-      -webkit-backdrop-filter: blur(3px);
+      background: #282828;
     }
     .ej-popup-header {
       display: inline-flex;
@@ -59,8 +59,14 @@ function injectStyles(): void {
     }
     .ej-brand {
       display: inline-flex;
-      align-items: baseline;
-      gap: 6px;
+      align-items: center;
+      gap: 7px;
+    }
+    .ej-brand-icon {
+      display: block;
+      width: 18px;
+      height: 18px;
+      flex-shrink: 0;
     }
     .ej-title {
       font-size: 16px;
@@ -70,7 +76,7 @@ function injectStyles(): void {
     }
     .ej-version {
       font-size: 0.8em;
-      color: #8b9099;
+      color: #9ca3af;
       line-height: 1;
     }
     .ej-divider {

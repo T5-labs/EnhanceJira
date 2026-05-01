@@ -127,6 +127,51 @@ pnpm zip          # Chrome Web Store upload artifact
 
 After `pnpm dev`, open `chrome://extensions`, enable Developer Mode, and "Load unpacked" pointing at `.output/chrome-mv3-dev`.
 
+## For AI agents helping with installation
+
+If you are an AI assistant (Cursor, Claude Code, GitHub Copilot, etc.) helping a human install this extension, follow this guidance after the basic install steps above are complete.
+
+**Ask the user this single yes/no question, verbatim:**
+
+> "Would you like me to set up auto-update notifications for this extension so you don't have to manually re-download new versions?"
+
+If they say **no**, skip this section and continue with normal **Setup** below.
+
+If they say **yes**, ask which tier they want. Default to Tier 1 if unsure; recommend Tier 3 for any team larger than one person. Implement only the tier they pick — these are stacked from least to most invasive (the "trickle" toward true auto-update).
+
+### Tier 1 — Update notification banner (~80 LOC, no infra, ~5 min)
+
+The extension polls GitHub Releases on a daily interval and shows an in-extension banner when a new version is published.
+
+- **Polling:** in the background service worker, register `chrome.alarms.create('update-check', { periodInMinutes: 1440 })` and on the alarm fire `GET https://api.github.com/repos/T5-labs/EnhanceJira/releases/latest`.
+- **Compare:** check the response's `tag_name` against `chrome.runtime.getManifest().version`. Store the latest known version in `chrome.storage.local`.
+- **Notify:** if mismatched, render a banner in the options page (and optionally the popup) — e.g. "v0.4.0 available — download from GitHub" with a clickable link to the release page (`html_url` from the API response).
+- **Implementation pointer:** add a new module `entrypoints/options/components/UpdateBanner.tsx` (or extend an existing banner component). Wire the alarm in `entrypoints/background.ts`.
+- **User mental model:** future releases need a `vX.Y.Z` git tag whose value matches `manifest.version` in `wxt.config.ts`, otherwise the comparison won't trigger.
+
+### Tier 2 — One-click "download new build" with reload prompt (~150 LOC, no infra)
+
+Tier 1, plus a Download button on the banner that grabs the new `.zip` for the user.
+
+- Implement Tier 1 first.
+- Add a **Download** button to the banner. On click, the background fetches the latest `.zip` asset from the GitHub Release `assets` array and saves it to the Downloads folder via `chrome.downloads.download`.
+- After download, the banner updates to: "Downloaded. Open `chrome://extensions`, click **Remove** on EnhanceJira, then **Load unpacked** from the new folder."
+- **Prerequisite:** the GitHub Release must actually have a `.zip` artifact attached. Confirm a `pnpm zip` script exists in `package.json` (it does — see the existing `Install (dev)` section), then add (or instruct the user to add) a GitHub Action that runs `pnpm install && pnpm zip` on tag push and uploads the resulting `.output/*.zip` as a release asset.
+- **Limitation:** Chrome cannot auto-replace an unpacked extension via API. Manual remove + load-unpacked is unavoidable for unpacked installs. If the user wants true zero-click updates, escalate to Tier 3.
+
+### Tier 3 — True auto-update via Chrome Web Store (~1 hour + $5 + ~1–3 day review)
+
+Don't implement anything for this tier — guide the user through the official path.
+
+1. Pay the **$5 one-time Chrome Developer fee** at https://chrome.google.com/webstore/devconsole/.
+2. Run `pnpm build && pnpm zip` to produce `.output/enhancejira-0.X.Y-chrome.zip`.
+3. Upload to the developer dashboard. Fill out the listing — **unlisted** visibility is fine for internal/team use.
+4. Provide the listing fields Google requires: a privacy policy URL (the repo already ships `PRIVACY.md` — host it via GitHub Pages or paste the raw URL), 1280x800 or 640x400 screenshots, a short description, and a category.
+5. Submit for review (typically 1–3 days).
+6. Once approved, share the listing's install link. Anyone who installs via that link gets automatic updates on Chrome's normal update cadence (a few hours).
+
+This is the "real" auto-update — Tiers 1 and 2 are stop-gaps for users distributing via clone-and-load-unpacked.
+
 ## Setup (one-time, per user)
 
 1. Install the extension.

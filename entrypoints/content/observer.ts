@@ -33,7 +33,6 @@ const DEBOUNCE_MS = 100;
 const BOARD_POLL_MS = 500;
 
 let lastReportedCount = -1;
-let warnedNoReviewColumn = false;
 let warnedMissingKey = false;
 
 let pendingTimer: ReturnType<typeof setTimeout> | null = null;
@@ -81,11 +80,9 @@ function runPass(board: HTMLElement): void {
   const reviewColumns = findReviewColumns(board);
 
   if (reviewColumns.length === 0) {
-    if (!warnedNoReviewColumn) {
-      warn('No "Review" column found on this board');
-      warnedNoReviewColumn = true;
-    }
-    // Untag anything previously tagged — Review may have been renamed/removed.
+    // Boards legitimately may not have a Review column — silently no-op
+    // beyond untagging anything previously tagged (Review may have been
+    // renamed/removed).
     for (const stale of findTaggedCards()) {
       untagCard(stale);
     }
@@ -93,10 +90,6 @@ function runPass(board: HTMLElement): void {
     emitCardsChanged();
     return;
   }
-
-  // Reset the warning latch so a board reshuffle that re-introduces Review
-  // doesn't permanently silence the warning if it later disappears again.
-  warnedNoReviewColumn = false;
 
   // Collect the current set of cards in Review columns.
   const currentReviewCards = new Set<HTMLElement>();

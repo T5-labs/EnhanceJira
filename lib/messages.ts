@@ -12,13 +12,11 @@
  */
 
 import type { Credentials } from './settings';
-import type { TestConnectionResult } from './auth';
 import type { PRState } from './bitbucket';
 
 export type Message =
   | { type: 'TEST_CONNECTION'; credentials: Credentials }
   | { type: 'GET_CONNECTION_STATUS' }
-  | { type: 'PING' }
   | { type: 'GET_PR_STATE'; key: string; tenant: string }
   | { type: 'VALIDATE_USERNAME'; username: string }
   | { type: 'GET_WORKSPACE_MEMBERS'; workspaceSlug: string }
@@ -56,8 +54,6 @@ export type ProbeResult = {
 export type DiagnosticsResponse =
   | { ok: true; results: ProbeResult[]; username?: string; displayName?: string }
   | { ok: false; error: string; results?: ProbeResult[] };
-
-export type PingResponse = { ok: true; time: number };
 
 /**
  * A single workspace member surfaced by the autocomplete in the options-page
@@ -112,25 +108,3 @@ export type ValidateUsernameResponse =
 export type GetPRStateResponse =
   | { ok: true; prs: PRState[] }
   | { ok: false; error: string; status?: number };
-
-/**
- * Maps each Message variant to its response shape.
- *
- * Usage:
- *   const r: Response<{ type: 'PING' }> = await browser.runtime.sendMessage({ type: 'PING' });
- */
-export type Response<T extends Message> = T extends { type: 'TEST_CONNECTION' }
-  ? TestConnectionResult
-  : T extends { type: 'GET_CONNECTION_STATUS' }
-    ? TestConnectionResult
-    : T extends { type: 'PING' }
-      ? PingResponse
-      : T extends { type: 'GET_PR_STATE' }
-        ? GetPRStateResponse
-        : T extends { type: 'VALIDATE_USERNAME' }
-          ? ValidateUsernameResponse
-          : T extends { type: 'GET_WORKSPACE_MEMBERS' }
-            ? GetWorkspaceMembersResponse
-            : T extends { type: 'RUN_DIAGNOSTICS' }
-              ? DiagnosticsResponse
-              : never;

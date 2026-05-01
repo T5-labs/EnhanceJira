@@ -8,7 +8,6 @@ import {
 import { loadCredentials, saveIdentity, type Credentials } from '../lib/settings';
 import type {
   Message,
-  PingResponse,
   GetPRStateResponse,
   ValidateUsernameResponse,
   GetWorkspaceMembersResponse,
@@ -29,12 +28,11 @@ import {
 /**
  * MV3 service worker — message router.
  *
- * Handles four message types from the rest of the extension:
+ * Handles three message types from the rest of the extension:
  *   - TEST_CONNECTION: validate caller-supplied (potentially unsaved)
  *     credentials against api.bitbucket.org/2.0/user.
  *   - GET_CONNECTION_STATUS: validate the SAVED credentials. Short-circuits
  *     to "Not connected" without an API hit if no creds are stored.
- *   - PING: cheap smoke test, returns the current epoch ms.
  *   - GET_PR_STATE: given a Jira key + tenant, return linked Bitbucket PR(s)
  *     with reviewer state. Owned by ./background/bitbucket.ts.
  *
@@ -92,7 +90,6 @@ export default defineBackground(() => {
       _sender,
     ): Promise<
       | TestConnectionResult
-      | PingResponse
       | GetPRStateResponse
       | ValidateUsernameResponse
       | GetWorkspaceMembersResponse
@@ -134,7 +131,6 @@ async function handle(
   message: Message,
 ): Promise<
   | TestConnectionResult
-  | PingResponse
   | GetPRStateResponse
   | ValidateUsernameResponse
   | GetWorkspaceMembersResponse
@@ -158,9 +154,6 @@ async function handle(
         await persistIdentityFromResult(result);
         return result;
       }
-
-      case 'PING':
-        return { ok: true, time: Date.now() };
 
       case 'GET_PR_STATE':
         return await getPRState(message.tenant, message.key);

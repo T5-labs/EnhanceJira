@@ -171,8 +171,6 @@ export const DEFAULT_CREDENTIALS: Credentials = {
   token: '',
 };
 
-export const DEFAULT_IDENTITY: Identity | null = null;
-
 export const MIN_APPROVALS_MIN = 1;
 export const MIN_APPROVALS_MAX = 10;
 
@@ -293,32 +291,6 @@ export async function clearCredentials(): Promise<void> {
 }
 
 // ─── Identity ────────────────────────────────────────────────────────────────
-
-export async function loadIdentity(): Promise<Identity | null> {
-  if (!isExtensionContextValid()) return null;
-  let raw: Record<string, unknown>;
-  try {
-    raw = await browser.storage.local.get(IDENTITY_KEY);
-  } catch (e) {
-    warnOnce('storage:loadIdentity', e);
-    return null;
-  }
-  const stored = raw[IDENTITY_KEY] as Partial<Identity> | undefined;
-  if (!stored || typeof stored !== 'object') return null;
-  if (typeof stored.username !== 'string' || stored.username.length === 0) {
-    return null;
-  }
-  if (typeof stored.displayName !== 'string') return null;
-  if (typeof stored.fetchedAt !== 'number' || !Number.isFinite(stored.fetchedAt)) {
-    return null;
-  }
-  return {
-    version: IDENTITY_SCHEMA_VERSION,
-    username: stored.username,
-    displayName: stored.displayName,
-    fetchedAt: stored.fetchedAt,
-  };
-}
 
 export async function saveIdentity(i: Identity): Promise<void> {
   if (!isExtensionContextValid()) return;

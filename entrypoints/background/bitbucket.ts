@@ -382,7 +382,6 @@ async function scanRepoForKey(
 
 export async function fetchPRDetail(
   creds: Credentials,
-  key: string,
   link: { workspace: string; repoSlug: string; prId: number },
 ): Promise<PRState | null> {
   const header = authHeader(creds);
@@ -411,176 +410,23 @@ export async function fetchPRDetail(
   }
 
   const b = body as {
-    title?: unknown;
-    links?: { html?: { href?: unknown } };
-    source?: {
-      branch?: { name?: unknown };
-      commit?: { hash?: unknown };
-    };
     participants?: unknown;
-    author?: {
-      username?: unknown;
-      nickname?: unknown;
-      uuid?: unknown;
-      display_name?: unknown;
-      links?: { avatar?: { href?: unknown } };
-    };
   };
 
-  const title = typeof b.title === 'string' ? b.title : '';
-  const htmlUrl =
-    b.links && b.links.html && typeof b.links.html.href === 'string'
-      ? b.links.html.href
-      : '';
-  const sourceBranch =
-    b.source && b.source.branch && typeof b.source.branch.name === 'string'
-      ? b.source.branch.name
-      : '';
-  const sourceCommitHash =
-    b.source && b.source.commit && typeof b.source.commit.hash === 'string'
-      ? b.source.commit.hash
-      : '';
-
-  // Author mapping. Mirrors mapParticipant for the username fallback —
-  // username → nickname → uuid (some workspaces omit one of the first two).
-  let authorUsername = '';
-  let authorDisplayName = '';
-  let authorAvatarUrl: string | undefined;
-  if (b.author) {
-    if (typeof b.author.username === 'string' && b.author.username.length > 0) {
-      authorUsername = b.author.username;
-    } else if (typeof b.author.nickname === 'string' && b.author.nickname.length > 0) {
-      authorUsername = b.author.nickname;
-    } else if (typeof b.author.uuid === 'string' && b.author.uuid.length > 0) {
-      authorUsername = b.author.uuid;
-    }
-    if (typeof b.author.display_name === 'string') {
-      authorDisplayName = b.author.display_name;
-    }
-    if (
-      b.author.links &&
-      b.author.links.avatar &&
-      typeof b.author.links.avatar.href === 'string'
-    ) {
-      authorAvatarUrl = b.author.links.avatar.href;
+  // Map every participant entry, then keep only formal reviewers — drive-by
+  // commenters (role !== 'REVIEWER') don't count toward the gate.
+  const reviewers: Reviewer[] = [];
+  if (Array.isArray(b.participants)) {
+    for (const p of b.participants) {
+      const part = mapReviewer(p);
+      if (part) reviewers.push(part);
     }
   }
 
-  // Fan out: participants mapping is local CPU work; build-status fetch is
-  // network. Run them concurrently — neither depends on the other.
-  const participantsPromise = (async (): Promise<Reviewer[]> => {
-    const out: Reviewer[] = [];
-    if (Array.isArray(b.participants)) {
-      for (const p of b.participants) {
-        const part = mapParticipant(p);
-        if (part) out.push(part);
-      }
-    }
-    return out;
-  })();
-
-  const buildStatePromise = sourceCommitHash
-    ? fetchBuildState(header, link.workspace, link.repoSlug, sourceCommitHash)
-    : Promise.resolve<PRState['buildState']>(undefined);
-
-  const [participants, buildState] = await Promise.all([
-    participantsPromise,
-    buildStatePromise,
-  ]);
-  const reviewers = participants.filter((r) => r.role === 'REVIEWER');
-
-  return {
-    key,
-    url: htmlUrl,
-    title,
-    sourceBranch,
-    buildState,
-    reviewers,
-    participants,
-    workspace: link.workspace,
-    repoSlug: link.repoSlug,
-    prId: link.prId,
-    authorUsername,
-    authorDisplayName,
-    authorAvatarUrl,
-  };
+  return { reviewers };
 }
 
-/**
- * Fetch all CI statuses for the source commit of a PR and aggregate them into
- * a single buildState value.
- *
- * Aggregation precedence (worst-wins): FAILED > INPROGRESS > STOPPED > SUCCESS.
- * Bitbucket's wire value is `SUCCESSFUL`; we map it to `SUCCESS` to match our
- * narrower union type.
- *
- * Fail-soft: any error path (network, non-2xx, malformed JSON) is logged once
- * and returns `undefined`. Build state is non-critical; the tooltip simply
- * omits the badge row when it's missing.
- */
-async function fetchBuildState(
-  authHeaderValue: string,
-  workspace: string,
-  repoSlug: string,
-  commitHash: string,
-): Promise<PRState['buildState']> {
-  const url = `https://api.bitbucket.org/2.0/repositories/${encodeURIComponent(workspace)}/${encodeURIComponent(repoSlug)}/commit/${encodeURIComponent(commitHash)}/statuses?pagelen=50`;
-
-  let res: Response;
-  try {
-    res = await throttledFetch(url, {
-      method: 'GET',
-      headers: { Authorization: authHeaderValue, Accept: 'application/json' },
-    });
-  } catch {
-    warnOnce(
-      'build-status-network',
-      'Build status network error — leaving buildState undefined',
-    );
-    return undefined;
-  }
-
-  if (!res.ok) {
-    warnOnce(
-      `build-status-${res.status}`,
-      `Build status returned ${res.status} — leaving buildState undefined`,
-    );
-    return undefined;
-  }
-
-  let body: { values?: unknown };
-  try {
-    body = (await res.json()) as { values?: unknown };
-  } catch {
-    warnOnce(
-      'build-status-malformed',
-      'Build status malformed response — leaving buildState undefined',
-    );
-    return undefined;
-  }
-
-  const values = Array.isArray(body.values) ? body.values : [];
-  let hasFailed = false;
-  let hasInProgress = false;
-  let hasStopped = false;
-  let hasSuccessful = false;
-
-  for (const v of values) {
-    const state = (v as { state?: unknown }).state;
-    if (state === 'FAILED') hasFailed = true;
-    else if (state === 'INPROGRESS') hasInProgress = true;
-    else if (state === 'STOPPED') hasStopped = true;
-    else if (state === 'SUCCESSFUL') hasSuccessful = true;
-  }
-
-  if (hasFailed) return 'FAILED';
-  if (hasInProgress) return 'INPROGRESS';
-  if (hasStopped) return 'STOPPED';
-  if (hasSuccessful) return 'SUCCESS';
-  return undefined;
-}
-
-function mapParticipant(p: unknown): Reviewer | null {
+function mapReviewer(p: unknown): Reviewer | null {
   const obj = p as {
     user?: {
       username?: unknown;
@@ -596,12 +442,15 @@ function mapParticipant(p: unknown): Reviewer | null {
   const user = obj.user;
   if (!user) return null;
 
+  // Drop drive-by commenters at the source — only formal reviewers reach the
+  // returned list, so downstream code never has to filter on role itself.
+  if (obj.role !== 'REVIEWER') return null;
+
   // Username priority: username → nickname → uuid. Bitbucket Cloud has been
   // phasing out `username` in favor of `nickname`; some workspaces / API
   // versions return one, the other, or both. Mirror the same fallback chain
   // in identity extraction (probeConnection + lib/auth.ts testConnection) so
-  // `Reviewer.username` and `Identity.username` align — the self-status
-  // badge matcher relies on that consistency.
+  // `Reviewer.username` and `Identity.username` align.
   let username = '';
   if (typeof user.username === 'string' && user.username.length > 0) {
     username = user.username;
@@ -618,7 +467,6 @@ function mapParticipant(p: unknown): Reviewer | null {
     user.links && user.links.avatar && typeof user.links.avatar.href === 'string'
       ? user.links.avatar.href
       : '';
-  const role: Reviewer['role'] = obj.role === 'REVIEWER' ? 'REVIEWER' : 'PARTICIPANT';
   // Bitbucket participant `state` varies across API versions / Server vs. Cloud:
   // "approved", "changes_requested" (Cloud), "needs_work" (Server/legacy), or
   // null/missing (pending). Lowercase before comparing for safety.
@@ -628,7 +476,7 @@ function mapParticipant(p: unknown): Reviewer | null {
   const changesRequested =
     stateStr === 'changes_requested' || stateStr === 'needs_work';
 
-  return { username, displayName, avatarUrl, role, approved, changesRequested };
+  return { username, displayName, avatarUrl, approved, changesRequested };
 }
 
 // ─── 3d. Cache + coalesce ───────────────────────────────────────────────────
@@ -713,7 +561,7 @@ async function runLinkageAndDetail(tenant: string, key: string): Promise<PRState
   }
 
   const details = await Promise.all(
-    links.map((link) => fetchPRDetail(creds, key, link)),
+    links.map((link) => fetchPRDetail(creds, link)),
   );
   return details.filter((d): d is PRState => d !== null);
 }

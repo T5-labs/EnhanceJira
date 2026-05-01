@@ -1,32 +1,25 @@
 /**
  * Single content-side fan-out for `browser.storage.onChanged` events.
  *
- * Three modules in the content script need to react to storage changes:
- *   - coloring.ts (settings → palette + recolor; credentials → gate fetches;
- *                  identity → re-evaluate scope filter)
- *   - tooltip.ts  (settings → re-render aggregation thresholds; identity →
- *                  re-evaluate scope filter)
+ * Two modules in the content script need to react to storage changes:
+ *   - coloring.ts (settings → palette + recolor; credentials → gate fetches)
  *   - banner.ts   (credentials → install/remove the no-token banner)
  *
  * Without this helper each one would register its own
  * `browser.storage.onChanged` listener and run the same
- * area-filter + key-filter + load-and-merge work three times for every
- * storage write. Consolidating is cheap and keeps the surface area for
- * "did I remember to update all three?" bugs to a single subscription
- * routine.
+ * area-filter + key-filter + load-and-merge work twice for every storage
+ * write. Consolidating is cheap and keeps the surface area for "did I
+ * remember to update both?" bugs to a single subscription routine.
  *
- * This module owns the live `Settings` / `Credentials` / `Identity` snapshots
- * — fan-out subscribers receive the freshly-loaded value, not just a
- * "something changed" signal, so they don't need to re-call the load
- * helpers themselves.
+ * This module owns the live `Settings` / `Credentials` snapshots — fan-out
+ * subscribers receive the freshly-loaded value, not just a "something
+ * changed" signal, so they don't need to re-call the load helpers themselves.
  */
 
 import {
   loadCredentials,
-  loadIdentity,
   loadSettings,
   type Credentials,
-  type Identity,
   type Settings,
 } from '../../lib/settings';
 import {
@@ -37,8 +30,7 @@ import {
 
 export type StorageEvent =
   | { type: 'settingsChanged'; settings: Settings }
-  | { type: 'credentialsChanged'; credentials: Credentials }
-  | { type: 'identityChanged'; identity: Identity | null };
+  | { type: 'credentialsChanged'; credentials: Credentials };
 
 type Listener = (event: StorageEvent) => void;
 
@@ -102,16 +94,6 @@ function install(): void {
             });
           return;
         }
-        if (area === 'local' && changes['identity']) {
-          void loadIdentity()
-            .then((identity) => {
-              emit({ type: 'identityChanged', identity });
-            })
-            .catch((e) => {
-              warnOnce('storage:onChanged-loadIdentity', e);
-            });
-          return;
-        }
         // Other areas / keys: ignored.
       } catch (e) {
         warnOnce('storage:onChanged-listener-body', e);
@@ -123,8 +105,8 @@ function install(): void {
 }
 
 /**
- * Subscribe to settings/credentials/identity changes. Listener fires with the
- * freshly loaded value. Returns an unsubscribe function.
+ * Subscribe to settings/credentials changes. Listener fires with the freshly
+ * loaded value. Returns an unsubscribe function.
  */
 export function onStorageChange(listener: Listener): () => void {
   install();
