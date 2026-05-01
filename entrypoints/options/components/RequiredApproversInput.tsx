@@ -305,6 +305,7 @@ export function RequiredApproversInput({
       displayName: m.displayName,
       avatarUrl: m.avatarUrl,
       isRequired: false,
+      isHidden: false,
     });
     setQuery('');
     setSearchOpen(false);
@@ -317,6 +318,12 @@ export function RequiredApproversInput({
   function setRequiredAt(idx: number, isRequired: boolean) {
     const next = value.slice();
     next[idx] = { ...next[idx]!, isRequired };
+    onChange(next);
+  }
+
+  function setHiddenAt(idx: number, isHidden: boolean) {
+    const next = value.slice();
+    next[idx] = { ...next[idx]!, isHidden };
     onChange(next);
   }
 
@@ -492,6 +499,9 @@ export function RequiredApproversInput({
                 <th style={{ padding: '6px 4px', width: 100, textAlign: 'center' }}>
                   Required
                 </th>
+                <th style={{ padding: '6px 4px', width: 60, textAlign: 'center' }}>
+                  Hide
+                </th>
                 <th style={{ padding: '6px 4px', width: 32 }} aria-label="Remove" />
               </tr>
             </thead>
@@ -549,6 +559,16 @@ export function RequiredApproversInput({
                             ? 'User not found on Bitbucket — toggle has no effect on the green-gate check.'
                             : undefined
                         }
+                      />
+                    </td>
+                    <td style={{ padding: '6px 4px', textAlign: 'center' }}>
+                      <input
+                        type="checkbox"
+                        role="switch"
+                        checked={entry.isHidden ?? false}
+                        onChange={(e) => setHiddenAt(i, e.target.checked)}
+                        aria-label={`Toggle hidden for @${entry.username}`}
+                        title="Hide this user from the branch-card hover popover."
                       />
                     </td>
                     <td style={{ padding: '6px 4px', textAlign: 'right' }}>

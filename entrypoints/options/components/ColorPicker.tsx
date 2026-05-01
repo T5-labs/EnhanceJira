@@ -1,37 +1,42 @@
 type Props = {
   id: string;
   label: string;
-  emoji: string;
   value: string;
   defaultValue: string;
   onChange: (hex: string) => void;
+  /**
+   * When true, the component renders only the color controls (color input,
+   * hex input, reset button) without its own label. Used inside the Card
+   * Colors table where the surrounding `<td>` carries the status label.
+   */
+  hideLabel?: boolean;
 };
 
 const HEX_RE = /^#[0-9a-fA-F]{6}$/;
 
-export function ColorPicker({ id, label, emoji, value, defaultValue, onChange }: Props) {
+export function ColorPicker({ id, label, value, defaultValue, onChange, hideLabel }: Props) {
   const isValid = HEX_RE.test(value);
 
   return (
     <div
       style={{
-        display: 'grid',
-        gridTemplateColumns: '120px 50px 110px auto 1fr',
+        display: 'flex',
         gap: 12,
         alignItems: 'center',
-        marginBottom: 14,
       }}
     >
-      <label htmlFor={id} style={{ fontSize: 14 }}>
-        <span style={{ marginRight: 6 }}>{emoji}</span>
-        {label}
-      </label>
+      {!hideLabel && (
+        <label htmlFor={id} style={{ fontSize: 14, width: 120 }}>
+          {label}
+        </label>
+      )}
 
       <input
         id={id}
         type="color"
         value={isValid ? value : defaultValue}
         onChange={(e) => onChange(e.target.value)}
+        aria-label={hideLabel ? label : undefined}
         style={{ width: 44, height: 32, padding: 0, border: '1px solid #c1c7d0', borderRadius: 3, background: '#fff' }}
       />
 
@@ -40,6 +45,7 @@ export function ColorPicker({ id, label, emoji, value, defaultValue, onChange }:
         value={value}
         onChange={(e) => onChange(e.target.value)}
         spellCheck={false}
+        aria-label={hideLabel ? `${label} hex value` : undefined}
         style={{
           fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
           fontSize: 13,
@@ -66,26 +72,6 @@ export function ColorPicker({ id, label, emoji, value, defaultValue, onChange }:
       >
         Reset
       </button>
-
-      <div
-        aria-label={`${label} preview`}
-        style={{
-          width: 200,
-          height: 56,
-          padding: '8px 12px',
-          background: isValid ? value : defaultValue,
-          color: '#172B4D',
-          borderRadius: 3,
-          border: '1px solid rgba(9,30,66,0.08)',
-          boxShadow: '0 1px 1px rgba(9,30,66,0.1)',
-          fontSize: 13,
-          fontWeight: 500,
-          display: 'flex',
-          alignItems: 'center',
-        }}
-      >
-        CMMS-1234 — Sample card
-      </div>
     </div>
   );
 }

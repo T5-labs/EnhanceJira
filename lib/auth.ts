@@ -91,8 +91,26 @@ export async function testConnection(c: Credentials): Promise<TestConnectionResu
 
   if (res.ok) {
     try {
-      const body = (await res.json()) as { username?: string; display_name?: string };
-      const username = typeof body.username === 'string' ? body.username : '';
+      const body = (await res.json()) as {
+        username?: string;
+        nickname?: string;
+        uuid?: string;
+        display_name?: string;
+      };
+      // Extraction priority mirrors mapParticipant in
+      // entrypoints/background/bitbucket.ts: username → nickname → uuid.
+      // Bitbucket Cloud has been phasing out `username` in favor of
+      // `nickname`, so on some workspaces the legacy `username` field is
+      // empty / missing. Falling back keeps `Identity.username` aligned with
+      // `Reviewer.username` so the self-status badge matcher resolves.
+      let username = '';
+      if (typeof body.username === 'string' && body.username.length > 0) {
+        username = body.username;
+      } else if (typeof body.nickname === 'string' && body.nickname.length > 0) {
+        username = body.nickname;
+      } else if (typeof body.uuid === 'string' && body.uuid.length > 0) {
+        username = body.uuid;
+      }
       const displayName = typeof body.display_name === 'string' ? body.display_name : undefined;
       if (!username) {
         return {

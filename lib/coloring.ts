@@ -3,10 +3,12 @@
  * the typed values we already compute upstream. Re-used by the content-script
  * coloring orchestrator (P5) and the tooltip (P6).
  *
- * Rule precedence (worst-wins when aggregating multiple PRs):
- *   red    — any reviewer has changesRequested === true
- *   yellow — has reviewers but isn't green
- *   green  — minApprovals satisfied AND every required approver has approved
+ * Rule precedence (when aggregating multiple PRs):
+ *   red     — any reviewer has changesRequested === true
+ *   green   — minApprovals satisfied AND every required approver has approved
+ *   pending — has a PR but isn't red or green (not enough approvals OR a
+ *             required approver hasn't approved yet). NO color override is
+ *             applied for pending — the card keeps Jira's default surface.
  *
  * Username comparison is case-insensitive: Bitbucket treats usernames as
  * case-insensitive in practice, and we don't want a config typo capitalising
@@ -22,7 +24,7 @@
  *
  * Edge cases:
  *   - a required username is not present in reviewers → not approved by them
- *     → falls through to yellow (or red, if changes-requested fired).
+ *     → falls through to pending (or red, if changes-requested fired).
  *   - no required entries → the "every required approver approved" check is
  *     vacuously true; only minApprovals matters.
  */
@@ -30,12 +32,18 @@
 import type { PRState } from './bitbucket';
 import type { Settings } from './settings';
 
-export type CardState = 'green' | 'yellow' | 'red' | 'no-pr' | 'unknown' | 'error';
+export type CardState =
+  | 'green'
+  | 'pending'
+  | 'red'
+  | 'no-pr'
+  | 'unknown'
+  | 'error';
 
 export function deriveCardStateForPR(
   pr: PRState,
   settings: Settings,
-): 'green' | 'yellow' | 'red' {
+): 'green' | 'pending' | 'red' {
   const reviewers = pr.reviewers;
 
   // Red short-circuit: any reviewer has explicitly requested changes.
@@ -48,7 +56,7 @@ export function deriveCardStateForPR(
     (n, r) => (r.approved ? n + 1 : n),
     0,
   );
-  if (approvedCount < settings.minApprovals) return 'yellow';
+  if (approvedCount < settings.minApprovals) return 'pending';
 
   // Every required approver must be present in reviewers AND approved.
   // Computed from the new `approvers` shape (v0.3.0): only entries with
@@ -60,7 +68,7 @@ export function deriveCardStateForPR(
     const match = reviewers.find(
       (r) => r.username.toLowerCase() === required && r.approved,
     );
-    if (!match) return 'yellow';
+    if (!match) return 'pending';
   }
 
   return 'green';
@@ -70,9 +78,15 @@ export function deriveCardStateForPR(
  * Aggregate state across N PRs linked to a single issue.
  *
  *   - prs.length === 0  → 'no-pr'
- *   - otherwise         → worst of red > yellow > green across all PRs
+ *   - any red           → 'red'
+ *   - else any green    → 'green'
+ *   - else              → 'pending'
  *
- * One red sibling is enough to make the card red.
+ * Note: 'pending' is the "absence of positive signal" state — the card keeps
+ * Jira's default surface color. Red still beats green because a single
+ * changes-requested PR should dominate, but green beats pending so a
+ * sibling PR fully approved still gets the green badge even when another
+ * sibling is still waiting on review.
  */
 export function aggregateCardState(
   prs: PRState[],
@@ -80,11 +94,11 @@ export function aggregateCardState(
 ): CardState {
   if (prs.length === 0) return 'no-pr';
 
-  let worst: 'green' | 'yellow' | 'red' = 'green';
+  let sawGreen = false;
   for (const pr of prs) {
     const s = deriveCardStateForPR(pr, settings);
     if (s === 'red') return 'red'; // can't get worse
-    if (s === 'yellow' && worst === 'green') worst = 'yellow';
+    if (s === 'green') sawGreen = true;
   }
-  return worst;
+  return sawGreen ? 'green' : 'pending';
 }

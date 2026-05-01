@@ -58,6 +58,7 @@ type ExportShape = {
   };
   expandBranchCardAvatars: boolean;
   branchCardAvatarCap: number;
+  onlyShowApprovers: boolean;
 };
 
 /**
@@ -75,6 +76,7 @@ export function serializeSettings(s: Settings): string {
     approvers: s.approvers.map((a) => ({
       username: a.username,
       isRequired: a.isRequired,
+      isHidden: a.isHidden,
       ...(a.displayName !== undefined ? { displayName: a.displayName } : {}),
       ...(a.avatarUrl !== undefined ? { avatarUrl: a.avatarUrl } : {}),
     })),
@@ -86,6 +88,7 @@ export function serializeSettings(s: Settings): string {
     },
     expandBranchCardAvatars: s.expandBranchCardAvatars,
     branchCardAvatarCap: s.branchCardAvatarCap,
+    onlyShowApprovers: s.onlyShowApprovers,
   };
   return JSON.stringify(payload, null, 2);
 }
@@ -202,9 +205,23 @@ export function parseAndValidateSettings(
           error: `approvers[${i}].avatarUrl must be a string when set.`,
         };
       }
+      // `isHidden` is OPTIONAL on import (added v0.3.7+) — older exports
+      // omit the field entirely. Accept boolean when present, default to
+      // false when absent. Reject any non-boolean value to keep the import
+      // strict against malformed input.
+      if (
+        r['isHidden'] !== undefined &&
+        typeof r['isHidden'] !== 'boolean'
+      ) {
+        return {
+          ok: false,
+          error: `approvers[${i}].isHidden must be a boolean when set.`,
+        };
+      }
       const entry: ApproverEntry = {
         username: r['username'] as string,
         isRequired: r['isRequired'] as boolean,
+        isHidden: r['isHidden'] === true,
       };
       if (typeof r['displayName'] === 'string') {
         entry.displayName = r['displayName'] as string;
@@ -230,7 +247,7 @@ export function parseAndValidateSettings(
     }
     approvers = (required as string[])
       .filter((s) => s.length > 0)
-      .map<ApproverEntry>((u) => ({ username: u, isRequired: true }));
+      .map<ApproverEntry>((u) => ({ username: u, isRequired: true, isHidden: false }));
   }
 
   // workspaceSlug — required string at the type level (v0.3.1+), but the
@@ -278,6 +295,21 @@ export function parseAndValidateSettings(
     expandBranchCardAvatars = o['expandBranchCardAvatars'] as boolean;
   }
 
+  // `onlyShowApprovers` is OPTIONAL on import (added v0.3.8+). Older export
+  // files predate this field — fall back to `false` (the DEFAULT_SETTINGS
+  // value) so legacy exports still validate. Reject any non-boolean value
+  // when present to keep the import strict against malformed input.
+  let onlyShowApprovers = DEFAULT_SETTINGS.onlyShowApprovers;
+  if (o['onlyShowApprovers'] !== undefined) {
+    if (typeof o['onlyShowApprovers'] !== 'boolean') {
+      return {
+        ok: false,
+        error: 'onlyShowApprovers must be a boolean.',
+      };
+    }
+    onlyShowApprovers = o['onlyShowApprovers'] as boolean;
+  }
+
   let branchCardAvatarCap = DEFAULT_SETTINGS.branchCardAvatarCap;
   if (o['branchCardAvatarCap'] !== undefined) {
     const rawCap = o['branchCardAvatarCap'];
@@ -308,6 +340,7 @@ export function parseAndValidateSettings(
     },
     expandBranchCardAvatars,
     branchCardAvatarCap,
+    onlyShowApprovers,
   };
 
   // Defensive: if the user somehow saved defaults differently, this still

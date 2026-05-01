@@ -144,6 +144,16 @@ let currentSettings: Settings | null = null;
 let started = false;
 let bodyObserver: MutationObserver | null = null;
 
+// Active popover registry: keyed by popover root, value is the pair of
+// (scopedObserver, ticketKey) needed to force a re-render when a setting flips
+// mid-hover (e.g. `onlyShowApprovers` toggled while the popover is open). We
+// can't re-derive these from the DOM alone, so we track them explicitly here.
+// Entries are pruned on disconnect/popover-detach inside the storage handler.
+const activePopovers = new Map<
+  HTMLElement,
+  { obs: MutationObserver; key: string }
+>();
+
 /**
  * Public entrypoint. Idempotent: safe to call once at content-script
  * startup; will not double-install styles or observers.
@@ -176,12 +186,35 @@ export function startBranchHoverCard(): void {
   onStorageChange((event) => {
     if (event.type !== 'settingsChanged') return;
     currentSettings = event.settings;
-    // If the user just enabled the feature mid-hover, sweep open popovers.
-    if (event.settings.expandBranchCardAvatars) {
+    // Sweep on any setting flip that affects what we paint: the user may have
+    // just enabled `expandBranchCardAvatars` (we need to inject extras) OR
+    // just enabled `onlyShowApprovers` while expansion is OFF (we still need
+    // to install the scoped observer + filter on Jira's natives). The body
+    // observer skips popover discovery while both kill-switches are off, so
+    // the registry may be empty here even with a popover open — re-scan to
+    // pick it up.
+    if (event.settings.expandBranchCardAvatars || event.settings.onlyShowApprovers) {
       try {
         scanForPopovers(document.body);
       } catch (e) {
         warnOnce('settings-rescan', e);
+      }
+    }
+    // Force a re-render of every currently-mounted popover so toggles like
+    // `onlyShowApprovers` apply immediately mid-hover. Without this, the
+    // user has to dismiss + re-open the popover to see the change. Detached
+    // popovers are pruned from the registry as we walk it.
+    for (const [popover, entry] of activePopovers) {
+      if (!popover.isConnected) {
+        activePopovers.delete(popover);
+        continue;
+      }
+      try {
+        runWithScopedObserver(entry.obs, popover, () =>
+          tryEnrich(popover, entry.key),
+        );
+      } catch (e) {
+        warnOnce('settings-live-rerender', e);
       }
     }
   });
@@ -202,7 +235,16 @@ function installStyles(): void {
 function attachBodyObserver(): void {
   if (bodyObserver !== null) return;
   bodyObserver = new MutationObserver((mutations) => {
-    if (!currentSettings || !currentSettings.expandBranchCardAvatars) return;
+    if (!currentSettings) return;
+    // Discover popovers whenever EITHER feature is on: expansion injects
+    // extras, and `onlyShowApprovers` filters Jira's natives. Both rely on
+    // `enrichPopover` installing a scoped observer + dispatching `tryEnrich`.
+    if (
+      !currentSettings.expandBranchCardAvatars &&
+      !currentSettings.onlyShowApprovers
+    ) {
+      return;
+    }
     try {
       // Cheap pre-filter: on a busy Jira board this observer fires hundreds
       // of times per second (drag, hover, autocomplete). Bail before we run
@@ -287,6 +329,10 @@ function enrichPopover(popover: HTMLElement): void {
   // → tryEnrich → mutate → fire → infinite loop and a frozen tab.
   const obs = attachScopedObserver(popover, key);
 
+  // Register so a settings flip (e.g. `onlyShowApprovers`) can force a
+  // re-render on this live popover without waiting for the next DOM mutation.
+  activePopovers.set(popover, { obs, key });
+
   // Try to render with whatever we have right now (cache may be primed).
   runWithScopedObserver(obs, popover, () => tryEnrich(popover, key));
 
@@ -294,6 +340,7 @@ function enrichPopover(popover: HTMLElement): void {
   // requestPRs will populate it and emit; we re-render then.
   const unsub = subscribeToKey(key, () => {
     if (!popover.isConnected) {
+      activePopovers.delete(popover);
       unsub();
       return;
     }
@@ -390,16 +437,33 @@ function runWithScopedObserver(
  * count is below the target.
  */
 function tryEnrich(popover: HTMLElement, key: string): void {
-  if (!currentSettings || !currentSettings.expandBranchCardAvatars) return;
-
-  const cached = getCachedPRs(key);
-  if (!cached || !cached.ok) return;
-  if (cached.prs.length === 0) return;
+  if (!currentSettings) return;
 
   const ul = popover.querySelector<HTMLUListElement>(
     `ul[data-testid="${AVATAR_GROUP_TESTID}"]`,
   );
   if (!ul) return;
+
+  // Filter-first: the `onlyShowApprovers` row filter only depends on the
+  // existing `<li>` children of `ul` (it parses Jira's hidden `--label`
+  // spans for native rows + reads our `dataset.ejApproverState` for any
+  // injected rows). It does NOT need PR data, the expansion kill-switch,
+  // or any injected extras — so apply it BEFORE any of the early-returns
+  // below so a popover with no overflow / no PR cache / expansion-off
+  // still gets filtered. Idempotent and safe to re-run after injection.
+  try {
+    applyOnlyApproversFilter(ul);
+  } catch (e) {
+    warnOnce('only-approvers-filter-pre', e);
+  }
+
+  // Skip the rest (extras injection) when the expansion feature is off.
+  // The filter above is the only deliverable this pass needs to make.
+  if (!currentSettings.expandBranchCardAvatars) return;
+
+  const cached = getCachedPRs(key);
+  if (!cached || !cached.ok) return;
+  if (cached.prs.length === 0) return;
 
   // Measure Jira's own native avatar to size ours identically. Falls back
   // to FALLBACK_AVATAR_SIZE when the popover hasn't laid out yet (rect 0)
@@ -413,9 +477,27 @@ function tryEnrich(popover: HTMLElement, key: string): void {
   // and never buried under the cap into the "+N" overflow chip — the red-X
   // badge has to be VISIBLE for the user to act on it.
   const all = aggregateReviewers(cached.prs);
-  const approved = all.filter((r) => r.approved);
-  const changesRequested = all.filter((r) => !r.approved && r.changesRequested);
-  const pending = all.filter((r) => !r.approved && !r.changesRequested);
+  // Filter out reviewers the user has marked `isHidden:true` in settings.
+  // Applies to BOTH the rendered avatars and the "+N" overflow count below
+  // (since `ordered.length` drives the chip). We deliberately do NOT mutate
+  // the upstream `cached.prs` / `PRState.reviewers` — other features (card
+  // coloring) still need to count hidden users.
+  const hiddenSet = buildHiddenUsernameSet(currentSettings);
+  const visible = hiddenSet.size === 0
+    ? all
+    : all.filter((r) => !hiddenSet.has(r.username.toLowerCase()));
+  // Optional "Only show approvers" filter: when the user has flipped this
+  // setting ON, drop any reviewer who hasn't approved (pending OR changes-
+  // requested). Applied to BOTH the rendered avatar row AND the "+N"
+  // overflow chip count (the chip count derives from `ordered.length`
+  // below). Rendering-only: `cached.prs.reviewers` is untouched, so card
+  // coloring and other features still see the full reviewer list.
+  const filtered = currentSettings.onlyShowApprovers
+    ? visible.filter((r) => r.approved)
+    : visible;
+  const approved = filtered.filter((r) => r.approved);
+  const changesRequested = filtered.filter((r) => !r.approved && r.changesRequested);
+  const pending = filtered.filter((r) => !r.approved && !r.changesRequested);
   const ordered = [...approved, ...changesRequested, ...pending];
 
   if (ordered.length === 0) return;
@@ -460,6 +542,9 @@ function tryEnrich(popover: HTMLElement, key: string): void {
     // Re-float any badges Jira's React may have re-mounted inside their
     // parent avatar div's stacking context during a re-render.
     floatBadgesAboveAvatars(ul);
+    // Apply / restore the `onlyShowApprovers` row filter — covers both
+    // injected and native <li>s in this avatar group.
+    applyOnlyApproversFilter(ul);
     return;
   }
 
@@ -505,6 +590,11 @@ function tryEnrich(popover: HTMLElement, key: string): void {
   // green check / red X stays visible even when the next avatar covers the
   // avatar circle itself. See `floatBadgesAboveAvatars` for details.
   floatBadgesAboveAvatars(ul);
+
+  // Apply / restore the `onlyShowApprovers` row filter — covers both
+  // injected and native <li>s in this avatar group. Last step so all <li>s
+  // are in the DOM in their final order before we hide / restore them.
+  applyOnlyApproversFilter(ul);
 }
 
 /**
@@ -641,6 +731,124 @@ function floatBadgesAboveAvatars(ul: HTMLUListElement): void {
 }
 
 /**
+ * Hide / restore avatar `<li>`s based on `onlyShowApprovers`. Applies to
+ * BOTH our injected `<li>`s and Jira's natives — the original gate dropped
+ * unapproved injections from `extras` but Jira's natives (the first ~2 the
+ * popover renders) were untouched. With this pass, "approvers only" really
+ * means "approvers only" across the whole row.
+ *
+ * Approval detection per `<li>`:
+ *   - Injected (`[data-ej-extra-approver="true"]`): we record the verdict
+ *     in `dataset.ejApproverState` at injection time. Falls back to
+ *     `--label` text parsing if (somehow) absent.
+ *   - Native: read the hidden `--label` span text. Approved labels end with
+ *     ` (approved)`; pending labels have no suffix; changes-requested ends
+ *     with ` (changes requested)`. Lowercased + suffix match handles minor
+ *     formatting drift.
+ *
+ * Idempotency: writes are guarded by an equality check so re-running does
+ * not produce mutation-observer wakeups. Restore deletes the marker dataset
+ * key so a subsequent pass with the toggle off correctly returns the row to
+ * its native state.
+ *
+ * Overflow chip: hidden entirely while the toggle is on. The "+N more
+ * people" semantic is meaningless under the filter (those are the very
+ * people we're filtering out), and showing it would drift visually as we
+ * hide more avatars. Restored when the toggle is off via the standard
+ * `updateOverflowChip` path that fed into this function.
+ *
+ * Caller MUST run inside `runWithScopedObserver` so style writes don't
+ * trigger the scoped observer to re-fire on its own writes.
+ */
+function applyOnlyApproversFilter(ul: HTMLUListElement): void {
+  const onlyApprovers = currentSettings?.onlyShowApprovers === true;
+  const children = Array.from(ul.children).filter(
+    (el): el is HTMLLIElement => el.tagName === 'LI',
+  );
+  for (const li of children) {
+    // Treat the overflow chip specially below — never participate in the
+    // hide/restore sweep here.
+    if (isOverflowLi(li)) continue;
+
+    const approved = isLiApproved(li);
+    const shouldHide = onlyApprovers && !approved;
+
+    if (shouldHide) {
+      if (li.style.display !== 'none') {
+        li.style.display = 'none';
+      }
+      if (li.dataset.ejHiddenByOnlyApprovers !== '1') {
+        li.dataset.ejHiddenByOnlyApprovers = '1';
+      }
+    } else if (li.dataset.ejHiddenByOnlyApprovers === '1') {
+      // Restore: only touch <li>s WE hid — leaves any other display:none
+      // (Jira-native or future-feature) alone.
+      if (li.style.display === 'none') {
+        li.style.display = '';
+      }
+      delete li.dataset.ejHiddenByOnlyApprovers;
+    }
+  }
+
+  // Overflow chip: hidden while filtering, since "+N more" no longer maps
+  // to a meaningful count. Restored by `updateOverflowChip` on the next
+  // tryEnrich pass when the toggle flips off.
+  const overflowLi = findOverflowLi(ul);
+  if (overflowLi) {
+    if (onlyApprovers) {
+      if (overflowLi.style.display !== 'none') {
+        overflowLi.style.display = 'none';
+      }
+      if (overflowLi.dataset.ejHiddenByOnlyApprovers !== '1') {
+        overflowLi.dataset.ejHiddenByOnlyApprovers = '1';
+      }
+    } else if (overflowLi.dataset.ejHiddenByOnlyApprovers === '1') {
+      // Only restore if WE hid it — `updateOverflowChip` may have its own
+      // reason to keep `display:none` (no remaining approvers beyond cap).
+      delete overflowLi.dataset.ejHiddenByOnlyApprovers;
+      // Defer the visible/hidden decision to `updateOverflowChip`, which
+      // ran earlier in this pass. If it set `display:none` for a legit
+      // reason (remaining <= 0) we leave it. If it set `display:''` we
+      // also leave it. Either way nothing to write here.
+    }
+  }
+}
+
+function isOverflowLi(li: HTMLLIElement): boolean {
+  return li.querySelector('[data-testid*="overflow"]') !== null;
+}
+
+/**
+ * Determine whether the avatar `<li>` represents an approved reviewer.
+ *
+ * Injected `<li>`s carry `dataset.ejApproverState` ("approved" |
+ * "changes-requested" | "none") set at build time — cheaper and more
+ * accurate than re-parsing label text. Native `<li>`s require text
+ * parsing on the hidden `--label` span; the canonical Jira format is
+ * `"Display Name (approved)"` for approved reviewers.
+ *
+ * Concern: the label text is localized. A non-English Jira would render
+ * `"(genehmigt)"` etc. and our suffix match would silently treat every
+ * approved native as pending. A more robust signal is the green-check
+ * `--status` SVG (`<circle fill="var(--ds-icon-success, #6A9A23)">`)
+ * which is locale-independent — flagged in the task return.
+ */
+function isLiApproved(li: HTMLLIElement): boolean {
+  // Fast path for our injected <li>s — verdict is recorded at build time.
+  if (li.getAttribute(EXTRA_LI_ATTR) === 'true') {
+    const state = li.dataset.ejApproverState;
+    if (state === 'approved') return true;
+    if (state === 'changes-requested' || state === 'none') return false;
+    // Fall through to label-text parsing if dataset wasn't set (older
+    // injection, or the markup was reconstructed by Jira's React).
+  }
+  const label = li.querySelector<HTMLElement>('[data-testid$="--label"]');
+  if (!label) return false;
+  const raw = (label.textContent ?? '').trim().toLowerCase();
+  return raw.endsWith('(approved)');
+}
+
+/**
  * Find the best Jira-native `<li>` to clone as a template. Prefers a non-
  * overflow, non-injected `<li>` that already has a `--status` badge so the
  * approved / changes-requested branches have a badge to mutate in place.
@@ -734,6 +942,23 @@ function aggregateReviewers(prs: PRState[]): Reviewer[] {
 
 function identityKey(r: Reviewer): string {
   return r.username.toLowerCase();
+}
+
+/**
+ * Lowercased username set of approvers marked `isHidden:true` in the user's
+ * settings. Used to filter the popover avatar row so hidden users (e.g. CI
+ * bots like Code Rabbit) never appear and never count toward the "+N"
+ * overflow chip. Returns an empty set when no settings are loaded yet OR
+ * when no entries are flagged hidden, letting the caller short-circuit the
+ * filter pass entirely on the common case.
+ */
+function buildHiddenUsernameSet(settings: Settings | null): Set<string> {
+  const out = new Set<string>();
+  if (!settings) return out;
+  for (const a of settings.approvers) {
+    if (a.isHidden) out.add(a.username.toLowerCase());
+  }
+  return out;
 }
 
 // ─── Popover → ticket key extraction ─────────────────────────────────────────
@@ -878,6 +1103,11 @@ function buildExtraLiFromTemplate(
   li.setAttribute(EXTRA_LI_ATTR, 'true');
   li.dataset.ejApproverKey = identityKey(r);
   li.dataset.ejAvatarSize = String(avatarSize);
+  li.dataset.ejApproverState = r.approved
+    ? 'approved'
+    : r.changesRequested
+      ? 'changes-requested'
+      : 'none';
 
   // Renumber every `data-testid` containing `avatar-N` to a unique high
   // index so we don't collide with Jira's native -0, -1, … values nor
@@ -1048,6 +1278,11 @@ function buildExtraLiFallback(r: Reviewer, avatarSize: number): HTMLLIElement {
   li.setAttribute(EXTRA_LI_ATTR, 'true');
   li.dataset.ejApproverKey = identityKey(r);
   li.dataset.ejAvatarSize = String(avatarSize);
+  li.dataset.ejApproverState = r.approved
+    ? 'approved'
+    : r.changesRequested
+      ? 'changes-requested'
+      : 'none';
 
   const badgeSize = Math.round(avatarSize * 0.4);
   const initialSize = Math.round(avatarSize * 0.45);

@@ -1,7 +1,9 @@
 /**
- * Content-side orchestrator: paints tagged Review-column cards green / yellow
- * / red based on PR state from the worker, and keeps that paint in sync with
- * settings + periodic refreshes.
+ * Content-side orchestrator: paints tagged Review-column cards green or red
+ * based on PR state from the worker, and keeps that paint in sync with
+ * settings + periodic refreshes. Pending cards (PR exists but not enough
+ * approvals or a required approver hasn't approved) get NO override — the
+ * card displays Jira's default surface color, same as cards with no PR.
  *
  * Lifecycle:
  *   1. installStyles() — guarantees the <style> tag is present

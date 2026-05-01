@@ -166,6 +166,8 @@ function runFastPathPaint(board: HTMLElement): void {
       const key = extractKey(card);
       if (!key) continue;
       const cached = getCachedCardState(key);
+      // Skip cards we've never seen state for; the debounced pass will pick
+      // them up on first mount.
       if (cached === undefined) continue;
       // Set the key first so downstream consumers (and the debounced pass's
       // findTaggedCards reconciliation) treat it as already tagged.

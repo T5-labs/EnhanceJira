@@ -6,6 +6,15 @@
     <!-- WXT options entrypoint: render the options page as a full browser tab. -->
     <meta name="manifest.open_in_tab" content="true" />
     <title>EnhanceJira — Settings</title>
+    <style>
+      /* Spinner animation for the inline test-connection icon (App.tsx).
+         Kept here so the inline-style icon button can reference it via
+         animation: ej-spin 900ms linear infinite. */
+      @keyframes ej-spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

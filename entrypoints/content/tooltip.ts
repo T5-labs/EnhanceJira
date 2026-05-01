@@ -546,7 +546,7 @@ function stateBadgeEl(pr: PRState): HTMLElement {
       el.classList.add('ej-state-success');
       el.textContent = '✓ SUCCESS';
       break;
-    case 'yellow':
+    case 'pending':
       el.classList.add('ej-state-warning');
       el.textContent = '⚠ WARNING';
       break;

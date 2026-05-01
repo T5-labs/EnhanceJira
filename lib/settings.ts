@@ -44,12 +44,18 @@ const IDENTITY_SCHEMA_VERSION = 1 as const;
  *     PR can only go green if every required approver has approved). Entries
  *     with `isRequired: false` are tracked-but-optional candidates — useful
  *     for surfacing in the UI without enforcing them.
+ *   - `isHidden: true` filters this user out of the branch-card hover popover
+ *     avatar row (both the rendered avatars and the "+N" overflow count).
+ *     Independent of `isRequired` — `isRequired:false, isHidden:true` is a
+ *     valid combo for users like CI bots (e.g. Code Rabbit) that should
+ *     never appear in the popover. Defaults to `false` for legacy entries.
  */
 export type ApproverEntry = {
   username: string;
   displayName?: string;
   avatarUrl?: string;
   isRequired: boolean;
+  isHidden: boolean;
 };
 
 export type Settings = {
@@ -89,6 +95,16 @@ export type Settings = {
    * BRANCH_CARD_AVATAR_CAP_MAX] on every load.
    */
   branchCardAvatarCap: number;
+  /**
+   * When `true`, the dev-info popover avatar row only shows reviewers who
+   * have approved (`approved === true`); reviewers who are pending OR have
+   * requested changes are filtered out of both the rendered avatars and the
+   * "+N" overflow chip count. Strictly rendering-only — the upstream
+   * reviewer list (used by card coloring etc.) is unaffected. Defaults to
+   * `false` so legacy records and fresh installs keep the existing
+   * three-tier sort behavior.
+   */
+  onlyShowApprovers: boolean;
 };
 
 export type Credentials = {
@@ -128,6 +144,7 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   expandBranchCardAvatars: true,
   branchCardAvatarCap: 5,
+  onlyShowApprovers: false,
 };
 
 /**
@@ -360,7 +377,7 @@ function mergeSettings(stored: Record<string, unknown> | undefined): Settings {
   } else if (Array.isArray(stored[LEGACY_APPROVERS_KEY])) {
     approvers = (stored[LEGACY_APPROVERS_KEY] as unknown[])
       .filter((s): s is string => typeof s === 'string' && s.length > 0)
-      .map<ApproverEntry>((u) => ({ username: u, isRequired: true }));
+      .map<ApproverEntry>((u) => ({ username: u, isRequired: true, isHidden: false }));
   } else {
     approvers = [];
   }
@@ -374,6 +391,14 @@ function mergeSettings(stored: Record<string, unknown> | undefined): Settings {
     typeof stored['expandBranchCardAvatars'] === 'boolean'
       ? (stored['expandBranchCardAvatars'] as boolean)
       : DEFAULT_SETTINGS.expandBranchCardAvatars;
+
+  // Strict-boolean parse: missing or non-boolean values default to `false`
+  // (matches DEFAULT_SETTINGS). Backwards-compatible — pre-existing records
+  // load with the filter off and behave identically to before.
+  const onlyShowApprovers =
+    typeof stored['onlyShowApprovers'] === 'boolean'
+      ? (stored['onlyShowApprovers'] as boolean)
+      : DEFAULT_SETTINGS.onlyShowApprovers;
 
   const rawCap = stored['branchCardAvatarCap'];
   let branchCardAvatarCap = DEFAULT_SETTINGS.branchCardAvatarCap;
@@ -397,6 +422,7 @@ function mergeSettings(stored: Record<string, unknown> | undefined): Settings {
     },
     expandBranchCardAvatars,
     branchCardAvatarCap,
+    onlyShowApprovers,
   };
 }
 
@@ -407,6 +433,7 @@ function cloneDefaults(): Settings {
     colors: { ...DEFAULT_SETTINGS.colors },
     expandBranchCardAvatars: DEFAULT_SETTINGS.expandBranchCardAvatars,
     branchCardAvatarCap: DEFAULT_SETTINGS.branchCardAvatarCap,
+    onlyShowApprovers: DEFAULT_SETTINGS.onlyShowApprovers,
   };
 }
 
@@ -475,6 +502,10 @@ function sanitizeApprovers(raw: unknown[]): ApproverEntry[] {
     const entry: ApproverEntry = {
       username,
       isRequired: o['isRequired'] === true,
+      // Strict boolean check; missing or non-boolean defaults to false. This
+      // is a backwards-compatible addition — legacy entries without this
+      // field load as `isHidden: false` and behave identically to before.
+      isHidden: o['isHidden'] === true,
     };
     if (typeof o['displayName'] === 'string') {
       entry.displayName = o['displayName'] as string;

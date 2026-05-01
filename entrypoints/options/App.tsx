@@ -18,7 +18,6 @@ import {
   parseAndValidateSettings,
   serializeSettings,
 } from '../../lib/settingsIO';
-import { contrastRatio } from '../../lib/contrast';
 import type { TestConnectionResult } from '../../lib/auth';
 import type { DiagnosticsResponse, Message } from '../../lib/messages';
 import { ColorPicker } from './components/ColorPicker';
@@ -27,8 +26,6 @@ import { SetupGuide } from './components/SetupGuide';
 import { ConnectedCard } from './components/ConnectedCard';
 import { DiagnosticsTable } from './components/DiagnosticsTable';
 
-const CARD_TEXT = '#172B4D';
-const WCAG_AA = 4.5;
 const MAX_CONTENT_WIDTH = '880px';
 
 type ToastKind = 'success' | 'error';
@@ -98,6 +95,9 @@ export function App() {
   const [importError, setImportError] = useState<string | null>(null);
   const [disconnectHover, setDisconnectHover] = useState(false);
   const [disconnectFocus, setDisconnectFocus] = useState(false);
+  // Hover state for the inline test-connection icon button (trailing
+  // adornment on the API token input). Drives a slight darken on hover.
+  const [testIconHover, setTestIconHover] = useState(false);
   // Sticky "tried-to-save with empty workspaceSlug" flag — once the user
   // hits Save with the field blank, the red border + inline error appear
   // until the field becomes non-empty (then the flag clears on its own via
@@ -106,9 +106,17 @@ export function App() {
     useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const workspaceSlugInputRef = useRef<HTMLInputElement | null>(null);
+  // Pending auto-test debounce timer. Cleared on unmount, on every keystroke,
+  // and on manual icon click so we never double-fire.
+  const autoTestTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Latest credentials in a ref so the debounced timeout body always sees the
+  // current values without re-creating the timer on every keystroke.
+  const credentialsRef = useRef<Credentials>(credentials);
+  credentialsRef.current = credentials;
 
   // Read the manifest version once at mount so the header bar can show
-  // "Settings · v<version>". Falls back gracefully if the API is unavailable.
+  // the title with a muted "v<version>" pill next to it (matching the
+  // popup card). Falls back gracefully if the API is unavailable.
   const manifestVersion = useMemo(() => {
     try {
       return browser.runtime.getManifest().version;
@@ -116,6 +124,10 @@ export function App() {
       return '';
     }
   }, []);
+
+  // Hover state for the GitHub icon link in the header — drives a subtle
+  // background highlight so it visually matches the test-icon button hover.
+  const [githubIconHover, setGithubIconHover] = useState(false);
 
   const refreshStatus = useCallback(async () => {
     setStatus({ kind: 'loading' });
@@ -175,11 +187,6 @@ export function App() {
   // tried-save) + inline error, and the search-disabled hint inside
   // RequiredApproversInput.
   const workspaceSlugMissing = settings.workspaceSlug.trim() === '';
-
-  const lowContrast =
-    contrastRatio(settings.colors.green, CARD_TEXT) < WCAG_AA ||
-    contrastRatio(settings.colors.yellow, CARD_TEXT) < WCAG_AA ||
-    contrastRatio(settings.colors.red, CARD_TEXT) < WCAG_AA;
 
   // Single source of truth for whether to show the SetupGuide prominently
   // (not connected) or tucked into a `<details>` disclosure (connected).
@@ -352,9 +359,52 @@ export function App() {
     }
   }
 
+  // Auto-test debounce: 600ms after the last keystroke/paste, fire a Test
+  // connection — provided the token is "long enough to plausibly auth"
+  // (>= 8 chars). Below that we'd just be burning Bitbucket /2.0/user calls
+  // on partial input. The icon stays clickable for an explicit re-test.
+  const AUTO_TEST_DEBOUNCE_MS = 600;
+  const AUTO_TEST_MIN_TOKEN_LENGTH = 8;
+
+  function onTokenChange(nextToken: string) {
+    setCredentials({ ...credentials, token: nextToken });
+    // Cancel any prior pending auto-test — we always restart the clock.
+    if (autoTestTimerRef.current !== null) {
+      clearTimeout(autoTestTimerRef.current);
+      autoTestTimerRef.current = null;
+    }
+    // Below the min-length threshold we don't even arm the timer.
+    if (nextToken.length < AUTO_TEST_MIN_TOKEN_LENGTH) return;
+    if (!credentialsRef.current.username.trim()) return;
+    autoTestTimerRef.current = setTimeout(() => {
+      autoTestTimerRef.current = null;
+      void onTestConnection();
+    }, AUTO_TEST_DEBOUNCE_MS);
+  }
+
+  // Cancel any pending auto-test on unmount so a stray timeout doesn't try to
+  // setState into an unmounted component.
+  useEffect(() => {
+    return () => {
+      if (autoTestTimerRef.current !== null) {
+        clearTimeout(autoTestTimerRef.current);
+        autoTestTimerRef.current = null;
+      }
+    };
+  }, []);
+
   async function onTestConnection() {
     if (testing) return;
-    if (!credentials.username.trim() || !credentials.token) {
+    // Always clear any pending auto-test so we don't double-fire when the
+    // user clicks the icon during the debounce window.
+    if (autoTestTimerRef.current !== null) {
+      clearTimeout(autoTestTimerRef.current);
+      autoTestTimerRef.current = null;
+    }
+    // Read the freshest credentials via the ref so callers from the debounced
+    // path don't get a stale closure value.
+    const current = credentialsRef.current;
+    if (!current.username.trim() || !current.token) {
       setTestResult({
         kind: 'error',
         message: 'Enter your username and token first.',
@@ -372,9 +422,9 @@ export function App() {
     // compare strict equality against the live form values — the green ✓
     // must clear the moment Alex edits either field after a successful test.
     const tested: Credentials = {
-      version: credentials.version,
-      username: credentials.username,
-      token: credentials.token,
+      version: current.version,
+      username: current.username,
+      token: current.token,
     };
     setLastTestedCredentials(tested);
     try {
@@ -486,12 +536,61 @@ export function App() {
       {/* ── Header bar (sticky top) ─────────────────────────────────────── */}
       <header style={headerBarStyle}>
         <div style={headerInnerStyle}>
-          <span style={{ fontSize: 20, fontWeight: 700, color: '#172B4D' }}>
-            EnhanceJira
-          </span>
-          <span style={{ fontSize: 13, color: '#5e6c84' }}>
-            Settings{manifestVersion ? ` · v${manifestVersion}` : ''}
-          </span>
+          {/* Title + version pair — mirrors the popup card so both surfaces
+              read the same: "EnhanceJira" with a muted "v<version>" right
+              next to it. Baseline alignment keeps the version sitting on
+              the same line as the title regardless of font metrics. */}
+          <div
+            style={{
+              display: 'inline-flex',
+              alignItems: 'baseline',
+              gap: 8,
+            }}
+          >
+            <span style={{ fontSize: 20, fontWeight: 500, color: '#172B4D' }}>
+              EnhanceJira
+            </span>
+            {manifestVersion && (
+              <span style={{ fontSize: '0.75em', color: '#888' }}>
+                v{manifestVersion}
+              </span>
+            )}
+          </div>
+          {/* GitHub icon link — opens the project repo in a new tab. Inline
+              SVG GitHub mark, sized to match the popup's gear icon. Hover
+              tracks state to mirror the muted-button visual style used
+              elsewhere on the page. */}
+          <a
+            href="https://github.com/T5-labs/EnhanceJira"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="View on GitHub"
+            title="View on GitHub"
+            onMouseEnter={() => setGithubIconHover(true)}
+            onMouseLeave={() => setGithubIconHover(false)}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 32,
+              height: 32,
+              borderRadius: 4,
+              color: githubIconHover ? '#172B4D' : '#5e6c84',
+              background: githubIconHover ? '#e5e7eb' : 'transparent',
+              textDecoration: 'none',
+              transition: 'background-color 120ms ease, color 120ms ease',
+            }}
+          >
+            <svg
+              width={22}
+              height={22}
+              viewBox="0 0 24 24"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path d="M12 .5C5.73.5.67 5.56.67 11.83c0 5.02 3.24 9.27 7.74 10.78.57.1.78-.25.78-.55v-1.93c-3.15.69-3.81-1.52-3.81-1.52-.51-1.31-1.26-1.66-1.26-1.66-1.03-.7.08-.69.08-.69 1.14.08 1.74 1.17 1.74 1.17 1.01 1.74 2.66 1.24 3.31.95.1-.74.4-1.24.72-1.53-2.51-.29-5.16-1.26-5.16-5.6 0-1.24.44-2.25 1.16-3.04-.12-.29-.5-1.44.11-3 0 0 .95-.3 3.11 1.16.9-.25 1.87-.38 2.83-.38.96 0 1.93.13 2.83.38 2.16-1.46 3.11-1.16 3.11-1.16.61 1.56.23 2.71.11 3 .72.79 1.16 1.8 1.16 3.04 0 4.35-2.66 5.31-5.18 5.59.41.36.77 1.06.77 2.13v3.16c0 .31.2.66.79.55 4.49-1.51 7.73-5.76 7.73-10.78C23.33 5.56 18.27.5 12 .5z" />
+            </svg>
+          </a>
         </div>
       </header>
 
@@ -608,17 +707,47 @@ export function App() {
 
             <Field label="API token" htmlFor="bb-token">
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <input
-                  id="bb-token"
-                  type={showToken ? 'text' : 'password'}
-                  value={credentials.token}
-                  onChange={(e) => setCredentials({ ...credentials, token: e.target.value })}
-                  placeholder="Paste your API token here"
-                  autoComplete="off"
-                  spellCheck={false}
-                  style={{ ...fieldStyle(validationState), flex: 1 }}
-                  aria-invalid={validationState === 'invalid' ? true : undefined}
-                />
+                <div style={{ ...tokenInputWrapperStyle, flex: 1 }}>
+                  <input
+                    id="bb-token"
+                    type={showToken ? 'text' : 'password'}
+                    value={credentials.token}
+                    onChange={(e) => onTokenChange(e.target.value)}
+                    placeholder="Paste your API token here"
+                    autoComplete="off"
+                    spellCheck={false}
+                    style={{ ...tokenInputFieldStyle(validationState) }}
+                    aria-invalid={validationState === 'invalid' ? true : undefined}
+                  />
+                  <button
+                    type="button"
+                    onClick={onTestConnection}
+                    onMouseEnter={() => setTestIconHover(true)}
+                    onMouseLeave={() => setTestIconHover(false)}
+                    disabled={testing}
+                    title={
+                      testing
+                        ? 'Testing connection…'
+                        : 'Test Bitbucket connection'
+                    }
+                    aria-label={
+                      testing
+                        ? 'Testing Bitbucket connection'
+                        : 'Test Bitbucket connection'
+                    }
+                    style={{
+                      ...testIconButtonStyle,
+                      ...(testIconHover && !testing
+                        ? testIconButtonHoverStyle
+                        : {}),
+                      ...(testing ? { cursor: 'wait' } : {}),
+                    }}
+                  >
+                    {testConnectionIcon(
+                      tokenIconState(validationState, credentials.token),
+                    )}
+                  </button>
+                </div>
                 <button
                   type="button"
                   onClick={() => setShowToken((v) => !v)}
@@ -627,240 +756,335 @@ export function App() {
                 >
                   {showToken ? 'Hide' : 'Show'}
                 </button>
-                {validationIcon(validationState)}
               </div>
-            </Field>
-
-            <div style={{ marginTop: 12, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-              <button
-                type="button"
-                onClick={onTestConnection}
-                disabled={testing}
-                style={{
-                  ...secondaryButtonStyle,
-                  ...(testing ? { opacity: 0.7, cursor: 'wait' } : {}),
-                }}
-              >
-                {testing ? 'Testing…' : 'Test connection'}
-              </button>
               {testResult.kind === 'error' && (
-                <span role="status" style={{ fontSize: 13, color: '#bf2600' }}>
+                <p role="status" style={{ ...helpStyle, color: '#bf2600' }}>
                   {testResult.message}
-                </span>
+                </p>
               )}
-            </div>
+            </Field>
             <DiagnosticsTable diagnostics={diagnostics} />
           </Section>
 
-          {/* ── Approval rules ────────────────────────────────────────── */}
-          <Section title="Approval rules">
-            {/* Min approvals + Required approvers share a flex row on desktop
-                (≥700px). Min approvals takes a fixed 180px column; Required
-                approvers fills the remaining space. The row wraps to a stacked
-                column on narrow viewports so the layout still works on mobile. */}
+          {/* ── Approval Rules ────────────────────────────────────────── */}
+          <Section title="Approval Rules">
+            {/* Header row: Min approvals (left), Required approvers heading
+                (center), Avatar cap (right). The three sit on a single flex
+                row above the users table so the section reads as a wide,
+                full-width control surface. Wraps to a stacked column on
+                narrow viewports. */}
             <div
               style={{
                 display: 'flex',
                 flexWrap: 'wrap',
-                gap: 24,
-                alignItems: 'flex-start',
-                marginBottom: 16,
+                gap: 16,
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginBottom: 12,
               }}
             >
-              <div style={{ width: 180, flexShrink: 0 }}>
-                <Field label="Minimum approvals" htmlFor="min-approvals">
-                  <input
-                    id="min-approvals"
-                    type="number"
-                    min={MIN_APPROVALS_MIN}
-                    max={MIN_APPROVALS_MAX}
-                    value={Number.isFinite(settings.minApprovals) ? settings.minApprovals : ''}
-                    onChange={(e) => {
-                      const next = e.target.value === '' ? NaN : Number(e.target.value);
-                      setSettings({ ...settings, minApprovals: next });
-                    }}
-                    style={{
-                      ...textInputStyle,
-                      width: 100,
-                      borderColor: minApprovalsInvalid ? '#de350b' : '#c1c7d0',
-                    }}
-                  />
-                  {minApprovalsInvalid && (
-                    <p style={{ ...helpStyle, color: '#de350b' }}>
-                      must be between {MIN_APPROVALS_MIN} and {MIN_APPROVALS_MAX}
-                    </p>
-                  )}
-                </Field>
+              <div style={{ flexShrink: 0 }}>
+                <label
+                  htmlFor="min-approvals"
+                  style={{
+                    display: 'block',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    marginBottom: 6,
+                    color: '#172B4D',
+                  }}
+                >
+                  Minimum Approvals
+                </label>
+                <input
+                  id="min-approvals"
+                  type="number"
+                  min={MIN_APPROVALS_MIN}
+                  max={MIN_APPROVALS_MAX}
+                  value={Number.isFinite(settings.minApprovals) ? settings.minApprovals : ''}
+                  onChange={(e) => {
+                    const next = e.target.value === '' ? NaN : Number(e.target.value);
+                    setSettings({ ...settings, minApprovals: next });
+                  }}
+                  style={{
+                    ...textInputStyle,
+                    width: 100,
+                    borderColor: minApprovalsInvalid ? '#de350b' : '#c1c7d0',
+                  }}
+                />
+                {minApprovalsInvalid && (
+                  <p style={{ ...helpStyle, color: '#de350b' }}>
+                    must be between {MIN_APPROVALS_MIN} and {MIN_APPROVALS_MAX}
+                  </p>
+                )}
               </div>
 
-              <div style={{ flex: 1, minWidth: 280 }}>
-                <Field label="Required approvers" htmlFor="required-approvers">
-                  <RequiredApproversInput
-                    value={settings.approvers}
-                    onChange={(next) => setSettings({ ...settings, approvers: next })}
-                    workspaceSlug={settings.workspaceSlug}
-                    isConnected={isConnected}
-                  />
-                  <p style={helpStyle}>
-                    Track candidate approvers and toggle which are mandatory. Search
-                    workspace members above (requires a workspace slug). Each row is
-                    checked against Bitbucket — ✓ valid, ✗ typo or removed (the toggle
-                    still works but the user is excluded from the green-gate check).
-                  </p>
-                </Field>
+              <div style={{ flexShrink: 0 }}>
+                <label
+                  htmlFor="branch-card-avatar-cap"
+                  style={{
+                    display: 'block',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    marginBottom: 6,
+                    color: '#172B4D',
+                    textAlign: 'right',
+                  }}
+                >
+                  Avatar Cap
+                </label>
+                <input
+                  id="branch-card-avatar-cap"
+                  type="number"
+                  min={BRANCH_CARD_AVATAR_CAP_MIN}
+                  max={BRANCH_CARD_AVATAR_CAP_MAX}
+                  step={1}
+                  disabled={!settings.expandBranchCardAvatars}
+                  value={
+                    Number.isFinite(settings.branchCardAvatarCap)
+                      ? settings.branchCardAvatarCap
+                      : ''
+                  }
+                  onChange={(e) => {
+                    const next =
+                      e.target.value === '' ? NaN : Number(e.target.value);
+                    setSettings({ ...settings, branchCardAvatarCap: next });
+                  }}
+                  style={{
+                    ...textInputStyle,
+                    width: 100,
+                    ...(settings.expandBranchCardAvatars
+                      ? {}
+                      : { opacity: 0.6, cursor: 'not-allowed' }),
+                  }}
+                />
               </div>
             </div>
 
-            {/* ── Branch popover avatars ─────────────────────────────────
-                Jira's native dev-info hover card collapses everything past
-                the first 2 reviewers into a "+N" chip. The toggle below
-                lets the content script extend the popover with extra
-                approver avatars up to the cap, so users see who actually
-                signed off without opening the PR. */}
-            <div
+            {/* Horizontal divider separating the Min Approvals / Avatar Cap
+                header row from the workspace-member search input below. */}
+            <hr
               style={{
-                display: 'flex',
-                flexWrap: 'wrap',
-                gap: 24,
-                alignItems: 'flex-start',
-                marginTop: 8,
+                border: 'none',
+                borderTop: '1px solid #dfe1e6',
+                margin: '16px 0',
               }}
-            >
-              <div style={{ flex: 1, minWidth: 280 }}>
-                <label
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    fontSize: 13,
-                    fontWeight: 600,
-                    color: '#172B4D',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <input
-                    id="expand-branch-card-avatars"
-                    type="checkbox"
-                    checked={settings.expandBranchCardAvatars}
-                    onChange={(e) =>
-                      setSettings({
-                        ...settings,
-                        expandBranchCardAvatars: e.target.checked,
-                      })
-                    }
-                  />
-                  Expand branch popover avatars
-                </label>
-                <p style={helpStyle}>
-                  When you hover a card's branch indicator, replace Jira's
-                  "+N" overflow chip with up to {settings.branchCardAvatarCap}{' '}
-                  approver avatars (approved-first). Disable to leave Jira's
-                  default popover untouched.
-                </p>
-              </div>
+            />
 
-              <div style={{ width: 180, flexShrink: 0 }}>
-                <Field label="Avatar cap" htmlFor="branch-card-avatar-cap">
-                  <input
-                    id="branch-card-avatar-cap"
-                    type="number"
-                    min={BRANCH_CARD_AVATAR_CAP_MIN}
-                    max={BRANCH_CARD_AVATAR_CAP_MAX}
-                    step={1}
-                    disabled={!settings.expandBranchCardAvatars}
-                    value={
-                      Number.isFinite(settings.branchCardAvatarCap)
-                        ? settings.branchCardAvatarCap
-                        : ''
-                    }
-                    onChange={(e) => {
-                      const next =
-                        e.target.value === '' ? NaN : Number(e.target.value);
-                      setSettings({ ...settings, branchCardAvatarCap: next });
-                    }}
-                    style={{
-                      ...textInputStyle,
-                      width: 100,
-                      ...(settings.expandBranchCardAvatars
-                        ? {}
-                        : { opacity: 0.6, cursor: 'not-allowed' }),
-                    }}
-                  />
-                  <p style={helpStyle}>
-                    {BRANCH_CARD_AVATAR_CAP_MIN}–{BRANCH_CARD_AVATAR_CAP_MAX}.
-                    Includes the 2 Jira already shows.
-                  </p>
-                </Field>
-              </div>
+            {/* Users table renders full-width below the header row. */}
+            <div style={{ marginBottom: 12 }}>
+              <RequiredApproversInput
+                value={settings.approvers}
+                onChange={(next) => setSettings({ ...settings, approvers: next })}
+                workspaceSlug={settings.workspaceSlug}
+                isConnected={isConnected}
+              />
+              <p style={helpStyle}>
+                Track candidate approvers and toggle which are mandatory. Search
+                workspace members above (requires a workspace slug). Each row is
+                checked against Bitbucket — ✓ valid, ✗ typo or removed (the toggle
+                still works but the user is excluded from the green-gate check).
+                Avatar cap controls how many approvers show in the branch-card
+                hover popover ({BRANCH_CARD_AVATAR_CAP_MIN}–
+                {BRANCH_CARD_AVATAR_CAP_MAX}, includes the 2 Jira already shows).
+              </p>
+            </div>
+
+            {/* ── Expand branch popover avatars toggle ───────────────────
+                Left in the Approval Rules section adjacent to the Avatar cap
+                input it gates. The toggle replaces Jira's "+N" overflow chip
+                with up to `branchCardAvatarCap` approver avatars. */}
+            <div style={{ marginTop: 8 }}>
+              <label
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: '#172B4D',
+                  cursor: 'pointer',
+                }}
+              >
+                <input
+                  id="expand-branch-card-avatars"
+                  type="checkbox"
+                  checked={settings.expandBranchCardAvatars}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      expandBranchCardAvatars: e.target.checked,
+                    })
+                  }
+                />
+                Expand branch popover avatars
+              </label>
+              <p style={helpStyle}>
+                When you hover a card's branch indicator, replace Jira's
+                "+N" overflow chip with up to {settings.branchCardAvatarCap}{' '}
+                approver avatars (approved-first). Disable to leave Jira's
+                default popover untouched.
+              </p>
+            </div>
+
+            {/* ── Only show approvers toggle ────────────────────────────
+                Grouped with the Expand toggle above — both are popover-
+                rendering settings. When ON, the popover avatar row only
+                shows reviewers who have already approved; pending and
+                changes-requested reviewers are filtered out. */}
+            <div style={{ marginTop: 8 }}>
+              <label
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: '#172B4D',
+                  cursor: 'pointer',
+                }}
+              >
+                <input
+                  id="only-show-approvers"
+                  type="checkbox"
+                  checked={settings.onlyShowApprovers}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      onlyShowApprovers: e.target.checked,
+                    })
+                  }
+                />
+                Only show approvers
+              </label>
+              <p style={helpStyle}>
+                Filter the branch popover avatar row to only reviewers who
+                have approved. Pending and changes-requested reviewers are
+                hidden (and excluded from the "+N" overflow count).
+              </p>
             </div>
           </Section>
 
-          {/* ── Card colors ───────────────────────────────────────────── */}
-          <Section title="Card colors">
-            <ColorPicker
-              id="color-green"
-              label="Approved"
-              emoji="🟢"
-              value={settings.colors.green}
-              defaultValue={DEFAULT_SETTINGS.colors.green}
-              onChange={(hex) =>
-                setSettings({ ...settings, colors: { ...settings.colors, green: hex } })
-              }
-            />
-            <ColorPicker
-              id="color-yellow"
-              label="Partial"
-              emoji="🟡"
-              value={settings.colors.yellow}
-              defaultValue={DEFAULT_SETTINGS.colors.yellow}
-              onChange={(hex) =>
-                setSettings({ ...settings, colors: { ...settings.colors, yellow: hex } })
-              }
-            />
-            <ColorPicker
-              id="color-red"
-              label="Blocked"
-              emoji="🔴"
-              value={settings.colors.red}
-              defaultValue={DEFAULT_SETTINGS.colors.red}
-              onChange={(hex) =>
-                setSettings({ ...settings, colors: { ...settings.colors, red: hex } })
-              }
-            />
-            {lowContrast && (
-              <p
-                role="status"
-                style={{
-                  marginTop: 8,
-                  padding: '8px 12px',
-                  background: '#fffae6',
-                  border: '1px solid #ffc400',
-                  borderRadius: 3,
-                  fontSize: 13,
-                  color: '#172B4D',
-                }}
-              >
-                ⚠ Some colors may be hard to read with card text.
-              </p>
-            )}
+          {/* ── Card Colors ───────────────────────────────────────────── */}
+          <Section title="Card Colors">
+            <table
+              style={{
+                width: '100%',
+                borderCollapse: 'collapse',
+                fontSize: 13,
+                color: '#172B4D',
+              }}
+            >
+              <thead>
+                <tr style={{ borderBottom: '1px solid #dfe1e6', textAlign: 'left' }}>
+                  <th style={{ padding: '8px 4px', width: 140, fontWeight: 600 }}>
+                    Status
+                  </th>
+                  <th style={{ padding: '8px 4px', fontWeight: 600 }}>Color</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr style={{ borderBottom: '1px solid #f4f5f7' }}>
+                  <td style={{ padding: '8px 4px' }}>
+                    <label htmlFor="color-green">Approved</label>
+                  </td>
+                  <td style={{ padding: '8px 4px' }}>
+                    <ColorPicker
+                      id="color-green"
+                      label="Approved"
+                      value={settings.colors.green}
+                      defaultValue={DEFAULT_SETTINGS.colors.green}
+                      onChange={(hex) =>
+                        setSettings({ ...settings, colors: { ...settings.colors, green: hex } })
+                      }
+                      hideLabel
+                    />
+                  </td>
+                </tr>
+                <tr style={{ borderBottom: '1px solid #f4f5f7' }}>
+                  <td style={{ padding: '8px 4px' }}>
+                    <label htmlFor="color-yellow">Partial</label>
+                  </td>
+                  <td style={{ padding: '8px 4px' }}>
+                    <ColorPicker
+                      id="color-yellow"
+                      label="Partial"
+                      value={settings.colors.yellow}
+                      defaultValue={DEFAULT_SETTINGS.colors.yellow}
+                      onChange={(hex) =>
+                        setSettings({ ...settings, colors: { ...settings.colors, yellow: hex } })
+                      }
+                      hideLabel
+                    />
+                  </td>
+                </tr>
+                <tr>
+                  <td style={{ padding: '8px 4px' }}>
+                    <label htmlFor="color-red">Blocked</label>
+                  </td>
+                  <td style={{ padding: '8px 4px' }}>
+                    <ColorPicker
+                      id="color-red"
+                      label="Blocked"
+                      value={settings.colors.red}
+                      defaultValue={DEFAULT_SETTINGS.colors.red}
+                      onChange={(hex) =>
+                        setSettings({ ...settings, colors: { ...settings.colors, red: hex } })
+                      }
+                      hideLabel
+                    />
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </Section>
 
           {/* ── Backup / Restore ──────────────────────────────────────── */}
           <Section title="Backup / Restore">
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <button
                 type="button"
                 onClick={onExportSettings}
-                style={secondaryButtonStyle}
+                style={{ ...secondaryButtonStyle, display: 'inline-flex', alignItems: 'center', gap: 8 }}
               >
-                Export settings
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="17 8 12 3 7 8" />
+                  <line x1="12" y1="3" x2="12" y2="15" />
+                </svg>
+                Export
               </button>
               <button
                 type="button"
                 onClick={onImportClick}
-                style={secondaryButtonStyle}
+                style={{ ...secondaryButtonStyle, display: 'inline-flex', alignItems: 'center', gap: 8 }}
               >
-                Import settings
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+                Import
               </button>
               <input
                 ref={importInputRef}
@@ -1077,7 +1301,7 @@ const headerInnerStyle: React.CSSProperties = {
   margin: '0 auto',
   padding: '14px 24px',
   display: 'flex',
-  alignItems: 'baseline',
+  alignItems: 'center',
   justifyContent: 'space-between',
   gap: 16,
 };
@@ -1187,6 +1411,149 @@ function validationIcon(validation: FieldValidation): ReactElement {
     case 'idle':
     default:
       return <span aria-hidden="true" style={validationIconSlotStyle} />;
+  }
+}
+
+// ─── Inline test-connection icon (trailing adornment on API token) ──────────
+// Replaces the legacy "Test connection" text button. Sits absolutely
+// positioned at the right edge of the API token input. Click to re-test;
+// auto-fires on debounced token entry. Visual state mirrors the per-field
+// validation state so a green check / red ✗ / spinning ⟳ / muted icon
+// matches the rest of the credentials-section feedback.
+
+const tokenInputWrapperStyle: React.CSSProperties = {
+  position: 'relative',
+  display: 'flex',
+  alignItems: 'center',
+};
+
+// The token input mirrors fieldStyle() but reserves padding-right for the
+// trailing icon so typed characters never slide under it.
+function tokenInputFieldStyle(
+  validation: FieldValidation,
+): React.CSSProperties {
+  return {
+    ...fieldStyle(validation),
+    width: '100%',
+    paddingRight: 36,
+  };
+}
+
+const testIconButtonStyle: React.CSSProperties = {
+  position: 'absolute',
+  top: '50%',
+  right: 4,
+  transform: 'translateY(-50%)',
+  width: 28,
+  height: 28,
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  padding: 0,
+  margin: 0,
+  background: 'transparent',
+  border: 'none',
+  borderRadius: 4,
+  cursor: 'pointer',
+  color: '#5e6c84',
+  transition: 'background-color 120ms, color 120ms',
+};
+
+const testIconButtonHoverStyle: React.CSSProperties = {
+  background: '#e5e7eb',
+  color: '#172B4D',
+};
+
+// Distinct state machine for the trailing icon. Same four states as
+// FieldValidation, but we route through a tiny helper so the icon also
+// reflects "no token yet" with a muted idle glyph (the field validation
+// state already returns 'idle' in that case — they coincide).
+type TokenIconState = 'idle' | 'testing' | 'valid' | 'invalid';
+
+function tokenIconState(
+  validation: FieldValidation,
+  token: string,
+): TokenIconState {
+  if (validation === 'testing') return 'testing';
+  if (!token) return 'idle';
+  if (validation === 'valid') return 'valid';
+  if (validation === 'invalid') return 'invalid';
+  return 'idle';
+}
+
+function testConnectionIcon(state: TokenIconState): ReactElement {
+  // Feather-style 18px stroke icons. No external lib.
+  switch (state) {
+    case 'valid':
+      return (
+        <svg
+          width={18}
+          height={18}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="#16a34a"
+          strokeWidth={2.25}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="12" r="10" />
+          <polyline points="8 12.5 11 15.5 16 9.5" />
+        </svg>
+      );
+    case 'invalid':
+      return (
+        <svg
+          width={18}
+          height={18}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="#dc2626"
+          strokeWidth={2.25}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="12" r="10" />
+          <line x1="9" y1="9" x2="15" y2="15" />
+          <line x1="15" y1="9" x2="9" y2="15" />
+        </svg>
+      );
+    case 'testing':
+      return (
+        <svg
+          width={18}
+          height={18}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="#2563eb"
+          strokeWidth={2.25}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+          style={{ animation: 'ej-spin 900ms linear infinite' }}
+        >
+          <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+        </svg>
+      );
+    case 'idle':
+    default:
+      return (
+        <svg
+          width={18}
+          height={18}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="12" r="10" />
+          <polyline points="8 12.5 11 15.5 16 9.5" />
+        </svg>
+      );
   }
 }
 

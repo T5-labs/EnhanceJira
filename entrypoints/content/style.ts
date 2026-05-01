@@ -17,9 +17,14 @@
  *     default and only loses to our rule on hover (when state-specific
  *     selectors raise their specificity); painting the descendants too
  *     ensures the chosen color is visible in the default state.
- *   - Only green/yellow/red are styled. 'no-pr', 'unknown', and 'error' get
- *     no background change so the card stays neutral; the tooltip (P6) is
- *     where users learn about errors.
+ *   - Only green/red are styled. 'pending', 'no-pr', 'unknown', and 'error'
+ *     get no background change so the card stays neutral — pending PRs
+ *     intentionally fall back to Jira's default surface color (the absence of
+ *     positive signal isn't itself a signal worth coloring); the tooltip (P6)
+ *     is where users learn about errors. The yellow color value is still
+ *     persisted in settings (and exposed in the options page as "Partial") to
+ *     preserve user customizations across versions and to keep the door open
+ *     for re-introducing a pending color override later if requested.
  */
 
 const STYLE_ID = 'ej-styles';
@@ -44,11 +49,6 @@ const STATIC_RULES = `
 [data-testid="platform-board-kit.ui.card.card"][data-ej-state="green"] [data-testid="platform-card.ui.card.focus-container"],
 [data-testid="platform-board-kit.ui.card.card"][data-ej-state="green"] [data-testid="platform-board-kit.ui.card.ripple.div"] {
   background-color: var(--ej-green) !important;
-}
-[data-testid="platform-board-kit.ui.card.card"][data-ej-state="yellow"],
-[data-testid="platform-board-kit.ui.card.card"][data-ej-state="yellow"] [data-testid="platform-card.ui.card.focus-container"],
-[data-testid="platform-board-kit.ui.card.card"][data-ej-state="yellow"] [data-testid="platform-board-kit.ui.card.ripple.div"] {
-  background-color: var(--ej-yellow) !important;
 }
 [data-testid="platform-board-kit.ui.card.card"][data-ej-state="red"],
 [data-testid="platform-board-kit.ui.card.card"][data-ej-state="red"] [data-testid="platform-card.ui.card.focus-container"],

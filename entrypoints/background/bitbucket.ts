@@ -420,6 +420,7 @@ export async function fetchPRDetail(
     participants?: unknown;
     author?: {
       username?: unknown;
+      nickname?: unknown;
       uuid?: unknown;
       display_name?: unknown;
       links?: { avatar?: { href?: unknown } };
@@ -441,13 +442,15 @@ export async function fetchPRDetail(
       : '';
 
   // Author mapping. Mirrors mapParticipant for the username fallback —
-  // legacy workspaces may omit `username` but always carry `uuid`.
+  // username → nickname → uuid (some workspaces omit one of the first two).
   let authorUsername = '';
   let authorDisplayName = '';
   let authorAvatarUrl: string | undefined;
   if (b.author) {
     if (typeof b.author.username === 'string' && b.author.username.length > 0) {
       authorUsername = b.author.username;
+    } else if (typeof b.author.nickname === 'string' && b.author.nickname.length > 0) {
+      authorUsername = b.author.nickname;
     } else if (typeof b.author.uuid === 'string' && b.author.uuid.length > 0) {
       authorUsername = b.author.uuid;
     }
@@ -581,6 +584,7 @@ function mapParticipant(p: unknown): Reviewer | null {
   const obj = p as {
     user?: {
       username?: unknown;
+      nickname?: unknown;
       uuid?: unknown;
       display_name?: unknown;
       links?: { avatar?: { href?: unknown } };
@@ -592,9 +596,17 @@ function mapParticipant(p: unknown): Reviewer | null {
   const user = obj.user;
   if (!user) return null;
 
+  // Username priority: username → nickname → uuid. Bitbucket Cloud has been
+  // phasing out `username` in favor of `nickname`; some workspaces / API
+  // versions return one, the other, or both. Mirror the same fallback chain
+  // in identity extraction (probeConnection + lib/auth.ts testConnection) so
+  // `Reviewer.username` and `Identity.username` align — the self-status
+  // badge matcher relies on that consistency.
   let username = '';
   if (typeof user.username === 'string' && user.username.length > 0) {
     username = user.username;
+  } else if (typeof user.nickname === 'string' && user.nickname.length > 0) {
+    username = user.nickname;
   } else if (typeof user.uuid === 'string' && user.uuid.length > 0) {
     username = user.uuid;
   } else {
