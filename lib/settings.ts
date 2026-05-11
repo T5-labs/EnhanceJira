@@ -96,13 +96,16 @@ export type Settings = {
    */
   branchCardAvatarCap: number;
   /**
-   * When `true`, the dev-info popover avatar row only shows reviewers who
-   * have approved (`approved === true`); reviewers who are pending OR have
-   * requested changes are filtered out of both the rendered avatars and the
-   * "+N" overflow chip count. Strictly rendering-only — the upstream
-   * reviewer list (used by card coloring etc.) is unaffected. Defaults to
-   * `false` so legacy records and fresh installs keep the existing
-   * three-tier sort behavior.
+   * Hide pending reviewers — show only those who've reacted (approved or
+   * requested changes). Field name kept for storage back-compat.
+   *
+   * When `true`, the dev-info popover avatar row keeps reviewers with
+   * `approved === true` OR `changesRequested === true`; reviewers who are
+   * still pending (neither flag) are filtered out of both the rendered
+   * avatars and the "+N" overflow chip count. Strictly rendering-only — the
+   * upstream reviewer list (used by card coloring etc.) is unaffected.
+   * Defaults to `false` so legacy records and fresh installs keep the
+   * existing three-tier sort behavior.
    */
   onlyShowApprovers: boolean;
 };

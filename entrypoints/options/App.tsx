@@ -927,11 +927,13 @@ export function App() {
               </p>
             </div>
 
-            {/* ── Only show approvers toggle ────────────────────────────
+            {/* ── Hide pending reviewers toggle ────────────────────────
                 Grouped with the Expand toggle above — both are popover-
                 rendering settings. When ON, the popover avatar row only
-                shows reviewers who have already approved; pending and
-                changes-requested reviewers are filtered out. */}
+                shows reviewers who have reacted (approved OR requested
+                changes); pending reviewers are filtered out. The setting
+                field is still named `onlyShowApprovers` for storage
+                back-compat — see the Settings type for the rename note. */}
             <div style={{ marginTop: 8 }}>
               <label
                 style={{
@@ -955,12 +957,13 @@ export function App() {
                     })
                   }
                 />
-                Only show approvers
+                Only show reviewers who've reacted
               </label>
               <p style={helpStyle}>
-                Filter the branch popover avatar row to only reviewers who
-                have approved. Pending and changes-requested reviewers are
-                hidden (and excluded from the "+N" overflow count).
+                When enabled, hides reviewers who haven't approved or
+                requested changes on the PR yet. Pending reviewers are
+                excluded from both the avatar row and the "+N" overflow
+                count.
               </p>
             </div>
           </Section>

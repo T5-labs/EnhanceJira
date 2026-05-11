@@ -475,7 +475,7 @@ function tryEnrich(popover: HTMLElement, key: string): void {
     warnOnce('allowlist-filter-pre', e);
   }
   try {
-    applyOnlyApproversFilter(ul);
+    applyOnlyApproversFilter(ul, prePrs);
   } catch (e) {
     warnOnce('only-approvers-filter-pre', e);
   }
@@ -526,14 +526,16 @@ function tryEnrich(popover: HTMLElement, key: string): void {
   const allowed = allowedSet.size === 0
     ? visible
     : visible.filter((r) => isReviewerAllowed(r, allowedSet));
-  // Optional "Only show approvers" filter: when the user has flipped this
-  // setting ON, drop any reviewer who hasn't approved (pending OR changes-
-  // requested). Applied to BOTH the rendered avatar row AND the "+N"
-  // overflow chip count (the chip count derives from `ordered.length`
-  // below). Rendering-only: `cached.prs.reviewers` is untouched, so card
-  // coloring and other features still see the full reviewer list.
+  // Optional "hide pending reviewers" filter: when the user has flipped this
+  // setting ON, drop any reviewer who hasn't reacted yet — keep approved AND
+  // changes-requested, drop pending only. Applied to BOTH the rendered avatar
+  // row AND the "+N" overflow chip count (the chip count derives from
+  // `ordered.length` below). Rendering-only: `cached.prs.reviewers` is
+  // untouched, so card coloring and other features still see the full
+  // reviewer list. (Setting field is still named `onlyShowApprovers` for
+  // storage back-compat — see `Settings` type for the rename note.)
   const filtered = currentSettings.onlyShowApprovers
-    ? allowed.filter((r) => r.approved)
+    ? allowed.filter((r) => r.approved || r.changesRequested)
     : allowed;
   const changesRequested = filtered.filter((r) => r.changesRequested);
   const approved = filtered.filter((r) => !r.changesRequested && r.approved);
@@ -585,7 +587,7 @@ function tryEnrich(popover: HTMLElement, key: string): void {
     // Apply / restore the allowlist + `onlyShowApprovers` row filters —
     // covers both injected and native <li>s in this avatar group.
     applyConfiguredUsersFilter(ul, cached.prs);
-    applyOnlyApproversFilter(ul);
+    applyOnlyApproversFilter(ul, cached.prs);
     // Re-decorate native rows whose Jira-painted badge is missing for a
     // verdict we DO know — covers the "changes-requested on a native row"
     // gap that Jira's board UI never paints itself.
@@ -640,7 +642,7 @@ function tryEnrich(popover: HTMLElement, key: string): void {
   // both injected and native <li>s in this avatar group. Last step so all
   // <li>s are in the DOM in their final order before we hide / restore them.
   applyConfiguredUsersFilter(ul, cached.prs);
-  applyOnlyApproversFilter(ul);
+  applyOnlyApproversFilter(ul, cached.prs);
   // Decorate native rows whose Jira-painted badge is missing for a verdict
   // we DO know (notably changes-requested, which Jira's board popover never
   // paints). Runs after the filters so we don't waste cycles decorating a
@@ -785,17 +787,28 @@ function floatBadgesAboveAvatars(ul: HTMLUListElement): void {
  * Hide / restore avatar `<li>`s based on `onlyShowApprovers`. Applies to
  * BOTH our injected `<li>`s and Jira's natives — the original gate dropped
  * unapproved injections from `extras` but Jira's natives (the first ~2 the
- * popover renders) were untouched. With this pass, "approvers only" really
- * means "approvers only" across the whole row.
+ * popover renders) were untouched. With this pass, "hide pending reviewers"
+ * really means "show only reviewers who've reacted" (approved OR changes-
+ * requested) across the whole row.
  *
- * Approval detection per `<li>`:
- *   - Injected (`[data-ej-extra-approver="true"]`): we record the verdict
- *     in `dataset.ejApproverState` at injection time. Falls back to
- *     `--label` text parsing if (somehow) absent.
- *   - Native: read the hidden `--label` span text. Approved labels end with
- *     ` (approved)`; pending labels have no suffix; changes-requested ends
- *     with ` (changes requested)`. Lowercased + suffix match handles minor
- *     formatting drift.
+ * Reaction detection per `<li>`: PRIMARY path is the displayName→Reviewer
+ * bridge built from `prs[].reviewers` (same source of truth and same
+ * canonicalization as `decorateNativeAvatarsWithStatusBadges` and
+ * `applyConfiguredUsersFilter`). A row counts as "reacted" iff its bridged
+ * Reviewer has `approved === true || changesRequested === true`. The bridge
+ * is necessary because Jira's native popover label only emits an
+ * `(approved)` suffix — it is silent on changes-requested — so a pure
+ * label-scrape would never recognize a changes-requesting native row and
+ * would incorrectly hide it under the "only approvers" toggle.
+ *
+ * FALLBACK path (when the bridge can't resolve the row, e.g. cache miss /
+ * pre-fetch / displayName drift): fall back to the suffix scrape via
+ * `isLiApproved(li) || isLiChangesRequested(li)`. The approved suffix path
+ * still works for Jira-painted approvers in the no-cache state; the
+ * changes-requested suffix path is best-effort (Jira doesn't emit it on
+ * natives but our own injected `<li>`s carry `dataset.ejApproverState`,
+ * which `isLiChangesRequested` reads first). Locale concern (English-only
+ * suffix match) is tracked on each helper.
  *
  * Idempotency: writes are guarded by an equality check so re-running does
  * not produce mutation-observer wakeups. Restore deletes the marker dataset
@@ -811,18 +824,73 @@ function floatBadgesAboveAvatars(ul: HTMLUListElement): void {
  * Caller MUST run inside `runWithScopedObserver` so style writes don't
  * trigger the scoped observer to re-fire on its own writes.
  */
-function applyOnlyApproversFilter(ul: HTMLUListElement): void {
+function applyOnlyApproversFilter(
+  ul: HTMLUListElement,
+  prs: PRState[],
+): void {
   const onlyApprovers = currentSettings?.onlyShowApprovers === true;
   const children = Array.from(ul.children).filter(
     (el): el is HTMLLIElement => el.tagName === 'LI',
   );
+
+  // Build the displayName→Reviewer bridge with the same canonicalization
+  // `decorateNativeAvatarsWithStatusBadges` uses. Empty `prs` (cache miss /
+  // pre-fetch) → empty map → every native row falls through to the suffix
+  // scrape, which preserves the legacy approver-detection behavior in the
+  // no-cache state. Same precedence as `aggregateReviewers`:
+  // changesRequested > approved > pending when multiple PRs supply the same
+  // canonical displayName with different verdicts.
+  const reviewerByDisplayName = new Map<string, Reviewer>();
+  for (const pr of prs) {
+    for (const r of pr.reviewers) {
+      if (!r.displayName) continue;
+      const dnKey = canonicalizeIdentity(r.displayName);
+      const prev = reviewerByDisplayName.get(dnKey);
+      if (!prev) {
+        reviewerByDisplayName.set(dnKey, r);
+        continue;
+      }
+      if (r.changesRequested && !prev.changesRequested) {
+        reviewerByDisplayName.set(dnKey, r);
+      } else if (
+        r.approved &&
+        !prev.approved &&
+        !prev.changesRequested
+      ) {
+        reviewerByDisplayName.set(dnKey, r);
+      }
+    }
+  }
+
   for (const li of children) {
     // Treat the overflow chip specially below — never participate in the
     // hide/restore sweep here.
     if (isOverflowLi(li)) continue;
 
-    const approved = isLiApproved(li);
-    const shouldHide = onlyApprovers && !approved;
+    // PRIMARY: resolve the row's displayName to a cached Reviewer and read
+    // the verdict directly. Skip the bridge for our injected `<li>`s —
+    // those carry `dataset.ejApproverState` and the suffix helpers fast-
+    // path through it without re-scraping label text.
+    let reacted = false;
+    let resolved = false;
+    if (li.getAttribute(EXTRA_LI_ATTR) !== 'true') {
+      const dn = readNativeLiDisplayName(li);
+      if (dn) {
+        const reviewer = reviewerByDisplayName.get(canonicalizeIdentity(dn));
+        if (reviewer) {
+          reacted = reviewer.approved === true || reviewer.changesRequested === true;
+          resolved = true;
+        }
+      }
+    }
+    // FALLBACK: bridge couldn't resolve (cache miss, displayName drift,
+    // injected row) — fall back to the suffix scrape, which handles both
+    // Jira-painted approvers via label text AND our injected rows via
+    // `dataset.ejApproverState`.
+    if (!resolved) {
+      reacted = isLiApproved(li) || isLiChangesRequested(li);
+    }
+    const shouldHide = onlyApprovers && !reacted;
 
     if (shouldHide) {
       if (li.style.display !== 'none') {
@@ -1217,6 +1285,32 @@ function isLiApproved(li: HTMLLIElement): boolean {
   if (!label) return false;
   const raw = (label.textContent ?? '').trim().toLowerCase();
   return raw.endsWith('(approved)');
+}
+
+/**
+ * Sibling of `isLiApproved`: detect whether the avatar `<li>` represents a
+ * reviewer who has requested changes. Used by `applyOnlyApproversFilter` to
+ * broaden the "hide pending reviewers" filter — both approved AND changes-
+ * requested rows are kept.
+ *
+ * Same caveats as `isLiApproved`: label text is localized. A non-English
+ * Jira would render a translated suffix and our match would silently treat
+ * every changes-requested native as pending. Parallel to the approved path,
+ * so left as-is to keep one locale-fix lever for both helpers.
+ */
+function isLiChangesRequested(li: HTMLLIElement): boolean {
+  // Fast path for our injected <li>s — verdict is recorded at build time.
+  if (li.getAttribute(EXTRA_LI_ATTR) === 'true') {
+    const state = li.dataset.ejApproverState;
+    if (state === 'changes-requested') return true;
+    if (state === 'approved' || state === 'none') return false;
+    // Fall through to label-text parsing if dataset wasn't set (older
+    // injection, or the markup was reconstructed by Jira's React).
+  }
+  const label = li.querySelector<HTMLElement>('[data-testid$="--label"]');
+  if (!label) return false;
+  const raw = (label.textContent ?? '').trim().toLowerCase();
+  return raw.endsWith('(changes requested)');
 }
 
 /**
