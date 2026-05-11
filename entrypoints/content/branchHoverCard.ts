@@ -479,6 +479,11 @@ function tryEnrich(popover: HTMLElement, key: string): void {
   } catch (e) {
     warnOnce('only-approvers-filter-pre', e);
   }
+  try {
+    decorateNativeAvatarsWithStatusBadges(ul, prePrs);
+  } catch (e) {
+    warnOnce('native-badge-decorate-pre', e);
+  }
 
   // Skip the rest (extras injection) when the expansion feature is off.
   // The filters above are the only deliverables this pass needs to make.
@@ -496,9 +501,11 @@ function tryEnrich(popover: HTMLElement, key: string): void {
   const cap = clampCap(currentSettings.branchCardAvatarCap);
 
   // Aggregate approvers across all PRs for this key. Three-tier sort so the
-  // "actioned" reviewers (approved, then changes-requested) are kept up-front
-  // and never buried under the cap into the "+N" overflow chip — the red-X
-  // badge has to be VISIBLE for the user to act on it.
+  // "actioned" reviewers (changes-requested first, then approved) are kept
+  // up-front and never buried under the cap into the "+N" overflow chip — the
+  // amber-dash badge has to be VISIBLE for the user to act on it. Changes-
+  // requested leads because it's the more actionable state (per the Fix 2
+  // precedence in `aggregateReviewers`).
   const all = aggregateReviewers(cached.prs);
   // Filter out reviewers the user has marked `isHidden:true` in settings.
   // Applies to BOTH the rendered avatars and the "+N" overflow count below
@@ -528,10 +535,10 @@ function tryEnrich(popover: HTMLElement, key: string): void {
   const filtered = currentSettings.onlyShowApprovers
     ? allowed.filter((r) => r.approved)
     : allowed;
-  const approved = filtered.filter((r) => r.approved);
-  const changesRequested = filtered.filter((r) => !r.approved && r.changesRequested);
-  const pending = filtered.filter((r) => !r.approved && !r.changesRequested);
-  const ordered = [...approved, ...changesRequested, ...pending];
+  const changesRequested = filtered.filter((r) => r.changesRequested);
+  const approved = filtered.filter((r) => !r.changesRequested && r.approved);
+  const pending = filtered.filter((r) => !r.changesRequested && !r.approved);
+  const ordered = [...changesRequested, ...approved, ...pending];
 
   if (ordered.length === 0) return;
 
@@ -579,6 +586,10 @@ function tryEnrich(popover: HTMLElement, key: string): void {
     // covers both injected and native <li>s in this avatar group.
     applyConfiguredUsersFilter(ul, cached.prs);
     applyOnlyApproversFilter(ul);
+    // Re-decorate native rows whose Jira-painted badge is missing for a
+    // verdict we DO know — covers the "changes-requested on a native row"
+    // gap that Jira's board UI never paints itself.
+    decorateNativeAvatarsWithStatusBadges(ul, cached.prs);
     return;
   }
 
@@ -630,6 +641,11 @@ function tryEnrich(popover: HTMLElement, key: string): void {
   // <li>s are in the DOM in their final order before we hide / restore them.
   applyConfiguredUsersFilter(ul, cached.prs);
   applyOnlyApproversFilter(ul);
+  // Decorate native rows whose Jira-painted badge is missing for a verdict
+  // we DO know (notably changes-requested, which Jira's board popover never
+  // paints). Runs after the filters so we don't waste cycles decorating a
+  // row about to be hidden.
+  decorateNativeAvatarsWithStatusBadges(ul, cached.prs);
 }
 
 /**
@@ -987,6 +1003,172 @@ function applyConfiguredUsersFilter(
   }
 }
 
+// Marker dataset attribute on a `--status` badge we injected onto a Jira-
+// native `<li>`. Lets `decorateNativeAvatarsWithStatusBadges` distinguish a
+// badge it owns (safe to remove and replace) from one Jira painted itself
+// (must not double-paint or remove). Matches the dataset-naming convention
+// used elsewhere in this file (`ejBadgeFloated`, `ejHiddenByAllowlist`, …).
+const INJECTED_NATIVE_BADGE_ATTR = 'ejInjectedStatus';
+const INJECTED_NATIVE_BADGE_SELECTOR =
+  '[data-ej-injected-status="true"]';
+
+/**
+ * Decorate Jira-native avatar `<li>`s with a status badge when Jira hasn't
+ * painted one but we know the reviewer's verdict.
+ *
+ * The motivating gap: Jira's board-card hover popover renders the first 2
+ * reviewers as native `<li>`s and paints a green check on approved ones, but
+ * does NOT paint a changes-requested (amber dash) badge — board UI ignores
+ * that state visually. So a reviewer who requested changes and is in the
+ * first two slots gets a bare avatar with no indicator.
+ *
+ * Matching strategy mirrors `applyConfiguredUsersFilter`: build a
+ * `Map<canonicalDisplayName, Reviewer>` from this popover's cached PR
+ * reviewers, then resolve each native row's `--label` displayName through
+ * the map to recover the full Reviewer (with `approved` + `changesRequested`
+ * flags). Same precedence as `aggregateReviewers`: when multiple PRs supply
+ * the same canonical displayName with different verdicts, changesRequested
+ * supersedes approved supersedes neither.
+ *
+ * Detection heuristic for "is Jira already painting a badge here?": look
+ * for any `[data-testid$="--status"]` inside the native `<li>` that ISN'T
+ * marked with `data-ej-injected-status="true"`. The `--status` testid is
+ * Jira's own badge-span signature (the same one `pickTemplateLi`,
+ * `floatBadgesAboveAvatars`, and `buildExtraLiFromTemplate` already key off
+ * for the cloned-template branch). Conservative because if the testid suffix
+ * ever rotates, we'd undercount Jira's badges and risk a double-paint — a
+ * second pass would catch it though, since our injected marker would be
+ * present and we'd no-op.
+ *
+ * Re-decoration semantics: every pass FIRST removes any `<li>`-scoped
+ * `[data-ej-injected-status="true"]` element so a stale changesRequested
+ * badge can't survive after the reviewer flipped to approved between
+ * renders. Then re-decides per the current reviewer state.
+ *
+ * Idempotency: writes are equality-guarded where applicable. Caller MUST
+ * run inside `runWithScopedObserver` so DOM mutations don't re-fire the
+ * scoped observer onto our own writes.
+ */
+function decorateNativeAvatarsWithStatusBadges(
+  ul: HTMLUListElement,
+  prs: PRState[],
+): void {
+  // Build the displayName→Reviewer bridge with the same canonicalization the
+  // allowlist filter uses. Empty `prs` (cache miss / pre-fetch) → empty map →
+  // every native row resolves to no reviewer and gets skipped, which is the
+  // correct degraded behavior (we don't have data, so we don't paint).
+  const reviewerByDisplayName = new Map<string, Reviewer>();
+  for (const pr of prs) {
+    for (const r of pr.reviewers) {
+      if (!r.displayName) continue;
+      const dnKey = canonicalizeIdentity(r.displayName);
+      const prev = reviewerByDisplayName.get(dnKey);
+      if (!prev) {
+        reviewerByDisplayName.set(dnKey, r);
+        continue;
+      }
+      // Same precedence as `aggregateReviewers`: changesRequested >
+      // approved > pending. A reviewer flagged on multiple PRs with the
+      // same canonical displayName collapses to the most actionable verdict.
+      if (r.changesRequested && !prev.changesRequested) {
+        reviewerByDisplayName.set(dnKey, r);
+      } else if (
+        r.approved &&
+        !prev.approved &&
+        !prev.changesRequested
+      ) {
+        reviewerByDisplayName.set(dnKey, r);
+      }
+    }
+  }
+
+  const children = Array.from(ul.children).filter(
+    (el): el is HTMLLIElement => el.tagName === 'LI',
+  );
+
+  for (const li of children) {
+    if (isOverflowLi(li)) continue;
+    // Skip our own injected `<li>`s — they already carry their badge from
+    // `buildExtraLiFromTemplate` / `buildExtraLiFallback` and route their
+    // state through `dataset.ejApproverState`.
+    if (li.getAttribute(EXTRA_LI_ATTR) === 'true') continue;
+
+    // Wipe any badge WE injected on a previous pass so reviewer-state flips
+    // (changesRequested → approved, approved → pending) replace cleanly
+    // instead of stacking. Jira-painted badges are left untouched.
+    const stale = li.querySelectorAll<HTMLElement>(
+      INJECTED_NATIVE_BADGE_SELECTOR,
+    );
+    for (const el of Array.from(stale)) {
+      el.remove();
+    }
+
+    const dn = readNativeLiDisplayName(li);
+    if (!dn) continue;
+    const reviewer = reviewerByDisplayName.get(canonicalizeIdentity(dn));
+    if (!reviewer) continue;
+
+    const state: ReviewState = reviewer.changesRequested
+      ? 'changes-requested'
+      : reviewer.approved
+        ? 'approved'
+        : 'none';
+    if (state === 'none') continue;
+
+    // Conservative double-paint guard: if a non-injected `--status` badge is
+    // already present anywhere in this `<li>`, Jira (or some other layer)
+    // owns it — leave it alone, regardless of whether it depicts approved or
+    // anything else. The stale-removal pass above already cleared any badge
+    // WE owned, so anything still here belongs to Jira.
+    const jiraBadge = li.querySelector<HTMLElement>(
+      `[data-testid$="--status"]:not(${INJECTED_NATIVE_BADGE_SELECTOR})`,
+    );
+    if (jiraBadge) continue;
+
+    const built = buildStatusBadge(state);
+    if (!built) continue;
+
+    // Tag so the next pass recognizes ours. Dataset writes hyphenate the
+    // attribute (`ejInjectedStatus` → `data-ej-injected-status`).
+    built.dataset[INJECTED_NATIVE_BADGE_ATTR] = 'true';
+
+    // Position in the same reference frame as Jira's own badges:
+    // `position: absolute; top: -1px; right: -1px;` relative to the `<li>`,
+    // matching the offsets `floatBadgesAboveAvatars` lands floated badges at.
+    // Ensure the `<li>` is the badge's offset parent — AtlasKit usually sets
+    // `position: relative` already; defend against a future tenant that
+    // doesn't, but only when the computed position is actually `static`.
+    if (getComputedStyle(li).position === 'static') {
+      if (li.style.position !== 'relative') {
+        li.style.position = 'relative';
+      }
+    }
+    built.style.position = 'absolute';
+    built.style.top = '-1px';
+    built.style.right = '-1px';
+    built.style.pointerEvents = 'none';
+    // Sit above the avatar div's stacking context (avatar divs use z-index
+    // 100..N via `applyUniformZIndex`). 999 mirrors `floatBadgesAboveAvatars`.
+    built.style.zIndex = '999';
+    // Pin the badge box to a fraction of the avatar size — same 0.4 ratio
+    // as `--ej-avatar-badge-size` for our injected lis. Read the avatar
+    // size off the live DOM so a tenant rotation (24/28/32) lands at the
+    // correct ratio without us having to thread the measurement through.
+    const inner = li.querySelector<HTMLElement>(NATIVE_AVATAR_INNER_SELECTOR);
+    const innerWidth = inner ? Math.round(inner.getBoundingClientRect().width) : 0;
+    const badgePx =
+      Number.isFinite(innerWidth) && innerWidth >= MIN_AVATAR_SIZE
+        ? Math.round(innerWidth * 0.4)
+        : Math.round(FALLBACK_AVATAR_SIZE * 0.4);
+    built.style.width = `${badgePx}px`;
+    built.style.height = `${badgePx}px`;
+    // The inner svg in `buildStatusBadge` carries `height/width="100%"`, so
+    // sizing the wrapper is sufficient for the icon to fill it.
+
+    li.appendChild(built);
+  }
+}
+
 /**
  * Read the canonical (suffix-stripped) display name from a native Jira avatar
  * `<li>`. The hidden `--label` span carries text like "Alex Arbuckle
@@ -1110,17 +1292,18 @@ function aggregateReviewers(prs: PRState[]): Reviewer[] {
         seen.set(k, r);
         continue;
       }
-      // Conflict resolution priority: approved > changesRequested > pending.
-      // Approved is the strongest signal (a green check across any PR wins).
-      // Changes-requested beats pure-pending so the red X is never silently
-      // dropped just because the same user is "pending" on a sibling PR — but
-      // it never beats approved (final approval supersedes a prior request).
-      if (r.approved && !prev.approved) {
+      // Conflict resolution priority: changesRequested > approved > pending.
+      // Changes-requested supersedes approval — actionable state wins so
+      // reviewers see fresh feedback (a red X across any PR wins, even if the
+      // same reviewer approved a sibling PR). Approved beats pure-pending so
+      // the green check is never silently dropped just because the same user
+      // is "pending" on a sibling PR.
+      if (r.changesRequested && !prev.changesRequested) {
         seen.set(k, r);
       } else if (
-        r.changesRequested &&
-        !prev.changesRequested &&
-        !prev.approved
+        r.approved &&
+        !prev.approved &&
+        !prev.changesRequested
       ) {
         seen.set(k, r);
       }
@@ -1311,10 +1494,10 @@ function buildExtraLiFromTemplate(
   li.setAttribute(EXTRA_LI_ATTR, 'true');
   li.dataset.ejApproverKey = identityKey(r);
   li.dataset.ejAvatarSize = String(avatarSize);
-  li.dataset.ejApproverState = r.approved
-    ? 'approved'
-    : r.changesRequested
-      ? 'changes-requested'
+  li.dataset.ejApproverState = r.changesRequested
+    ? 'changes-requested'
+    : r.approved
+      ? 'approved'
       : 'none';
 
   // Renumber every `data-testid` containing `avatar-N` to a unique high
@@ -1334,10 +1517,10 @@ function buildExtraLiFromTemplate(
     }
   }
 
-  const suffix = r.approved
-    ? ' (approved)'
-    : r.changesRequested
-      ? ' (changes requested)'
+  const suffix = r.changesRequested
+    ? ' (changes requested)'
+    : r.approved
+      ? ' (approved)'
       : '';
   const labelText = `${r.displayName || r.username}${suffix}`;
 
@@ -1390,10 +1573,13 @@ function buildExtraLiFromTemplate(
   }
 
   // Compute review state and reconcile the status badge (`--status` span).
-  const state: ReviewState = r.approved
-    ? 'approved'
-    : r.changesRequested
-      ? 'changes-requested'
+  // Mirrors the changesRequested > approved > pending precedence used by
+  // `aggregateReviewers` so a reviewer with both flags renders the actionable
+  // amber-dash badge, not the green check.
+  const state: ReviewState = r.changesRequested
+    ? 'changes-requested'
+    : r.approved
+      ? 'approved'
       : 'none';
   const statusSpan = li.querySelector<HTMLElement>('[data-testid$="--status"]');
   if (state === 'none') {
@@ -1486,10 +1672,10 @@ function buildExtraLiFallback(r: Reviewer, avatarSize: number): HTMLLIElement {
   li.setAttribute(EXTRA_LI_ATTR, 'true');
   li.dataset.ejApproverKey = identityKey(r);
   li.dataset.ejAvatarSize = String(avatarSize);
-  li.dataset.ejApproverState = r.approved
-    ? 'approved'
-    : r.changesRequested
-      ? 'changes-requested'
+  li.dataset.ejApproverState = r.changesRequested
+    ? 'changes-requested'
+    : r.approved
+      ? 'approved'
       : 'none';
 
   const badgeSize = Math.round(avatarSize * 0.4);
@@ -1501,10 +1687,10 @@ function buildExtraLiFallback(r: Reviewer, avatarSize: number): HTMLLIElement {
   const avatar = document.createElement('div');
   avatar.className = 'ej-extra-approver';
   avatar.setAttribute('role', 'img');
-  const suffix = r.approved
-    ? ' (approved)'
-    : r.changesRequested
-      ? ' (changes requested)'
+  const suffix = r.changesRequested
+    ? ' (changes requested)'
+    : r.approved
+      ? ' (approved)'
       : '';
   const labelText = `${r.displayName || r.username}${suffix}`;
   avatar.setAttribute('aria-label', labelText);
@@ -1525,10 +1711,10 @@ function buildExtraLiFallback(r: Reviewer, avatarSize: number): HTMLLIElement {
     avatar.appendChild(buildInitialsNode(r, avatarSize));
   }
 
-  const state: ReviewState = r.approved
-    ? 'approved'
-    : r.changesRequested
-      ? 'changes-requested'
+  const state: ReviewState = r.changesRequested
+    ? 'changes-requested'
+    : r.approved
+      ? 'approved'
       : 'none';
   const badge = buildFallbackStatusBadge(state);
   if (badge) {
