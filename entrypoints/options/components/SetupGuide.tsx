@@ -104,6 +104,18 @@ const STEPS: Step[] = [
     ),
   },
   {
+    title: 'Set the longest expiration available',
+    body: (
+      <>
+        The form asks for an expiration date first.{' '}
+        <strong>Pick the longest option</strong> Atlassian offers
+        (typically 1 year). When the token expires you&rsquo;ll have to
+        redo this flow &mdash; picking the maximum keeps you connected
+        as long as possible.
+      </>
+    ),
+  },
+  {
     title: "Pick 'Bitbucket' as the app",
     body: (
       <>
@@ -112,18 +124,6 @@ const STEPS: Step[] = [
         not Confluence. This is the most-missed step. Tokens issued for
         the wrong app will fail with a 401 &ldquo;Token rejected&rdquo;
         error in the next step.
-      </>
-    ),
-  },
-  {
-    title: 'Set the longest expiration available',
-    body: (
-      <>
-        After picking Bitbucket, the form asks for an expiration date.{' '}
-        <strong>Pick the longest option</strong> Atlassian offers
-        (typically 1 year). When the token expires you&rsquo;ll have to
-        redo this flow &mdash; picking the maximum keeps you connected
-        as long as possible.
       </>
     ),
   },
@@ -355,7 +355,7 @@ export function SetupGuide({ embedded = false }: Props = {}) {
         <ul style={troubleshootListStyle}>
           <li>
             Token created without picking &ldquo;Bitbucket&rdquo; in the
-            app dropdown (step 3)
+            app dropdown (step 4)
           </li>
           <li>
             Wrong scopes granted &mdash; you need ALL FOUR:{' '}

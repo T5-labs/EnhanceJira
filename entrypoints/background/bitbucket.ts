@@ -463,6 +463,12 @@ function mapReviewer(p: unknown): Reviewer | null {
   }
 
   const displayName = typeof user.display_name === 'string' ? user.display_name : '';
+  // Capture `user.uuid` independently of the username priority chain above.
+  // This is NOT a fallback for `username` — it's a parallel identity token
+  // used by the picker allowlist (`isReviewerAllowed`) to match legacy
+  // picker-stored UUID-form entries (`{7834…}`) against the participant.
+  const uuid =
+    typeof user.uuid === 'string' && user.uuid.length > 0 ? user.uuid : undefined;
   const avatarUrl =
     user.links && user.links.avatar && typeof user.links.avatar.href === 'string'
       ? user.links.avatar.href
@@ -476,7 +482,7 @@ function mapReviewer(p: unknown): Reviewer | null {
   const changesRequested =
     stateStr === 'changes_requested' || stateStr === 'needs_work';
 
-  return { username, displayName, avatarUrl, approved, changesRequested };
+  return { username, uuid, displayName, avatarUrl, approved, changesRequested };
 }
 
 // ─── 3d. Cache + coalesce ───────────────────────────────────────────────────

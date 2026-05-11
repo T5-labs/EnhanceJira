@@ -33,7 +33,12 @@
  *     can never throw out of an observer.
  */
 
-import type { PRState, Reviewer } from '../../lib/bitbucket';
+import {
+  canonicalizeIdentity,
+  isReviewerAllowed,
+  type PRState,
+  type Reviewer,
+} from '../../lib/bitbucket';
 import { loadSettings, type Settings } from '../../lib/settings';
 import { debug, warn } from '../../lib/log';
 import { getCachedPRs, requestPRs, subscribeToKey } from './state';
@@ -187,13 +192,17 @@ export function startBranchHoverCard(): void {
     if (event.type !== 'settingsChanged') return;
     currentSettings = event.settings;
     // Sweep on any setting flip that affects what we paint: the user may have
-    // just enabled `expandBranchCardAvatars` (we need to inject extras) OR
-    // just enabled `onlyShowApprovers` while expansion is OFF (we still need
-    // to install the scoped observer + filter on Jira's natives). The body
-    // observer skips popover discovery while both kill-switches are off, so
-    // the registry may be empty here even with a popover open — re-scan to
-    // pick it up.
-    if (event.settings.expandBranchCardAvatars || event.settings.onlyShowApprovers) {
+    // just enabled `expandBranchCardAvatars` (we need to inject extras), or
+    // `onlyShowApprovers` while expansion is OFF (filter on natives), or just
+    // populated their `approvers` allowlist (filter on natives independently
+    // of either kill-switch). The body observer skips popover discovery while
+    // all three are off / empty, so the registry may be empty here even with
+    // a popover open — re-scan to pick it up.
+    if (
+      event.settings.expandBranchCardAvatars ||
+      event.settings.onlyShowApprovers ||
+      event.settings.approvers.length > 0
+    ) {
       try {
         scanForPopovers(document.body);
       } catch (e) {
@@ -236,12 +245,15 @@ function attachBodyObserver(): void {
   if (bodyObserver !== null) return;
   bodyObserver = new MutationObserver((mutations) => {
     if (!currentSettings) return;
-    // Discover popovers whenever EITHER feature is on: expansion injects
-    // extras, and `onlyShowApprovers` filters Jira's natives. Both rely on
-    // `enrichPopover` installing a scoped observer + dispatching `tryEnrich`.
+    // Discover popovers whenever ANY of these three reasons fires: expansion
+    // injects extras, `onlyShowApprovers` filters Jira's natives, and a
+    // populated `approvers` allowlist filters Jira's natives independently of
+    // either kill-switch. All three rely on `enrichPopover` installing a
+    // scoped observer + dispatching `tryEnrich`.
     if (
       !currentSettings.expandBranchCardAvatars &&
-      !currentSettings.onlyShowApprovers
+      !currentSettings.onlyShowApprovers &&
+      currentSettings.approvers.length === 0
     ) {
       return;
     }
@@ -447,10 +459,21 @@ function tryEnrich(popover: HTMLElement, key: string): void {
   // Filter-first: the `onlyShowApprovers` row filter only depends on the
   // existing `<li>` children of `ul` (it parses Jira's hidden `--label`
   // spans for native rows + reads our `dataset.ejApproverState` for any
-  // injected rows). It does NOT need PR data, the expansion kill-switch,
-  // or any injected extras — so apply it BEFORE any of the early-returns
-  // below so a popover with no overflow / no PR cache / expansion-off
-  // still gets filtered. Idempotent and safe to re-run after injection.
+  // injected rows). The configured-users allowlist filter has the same
+  // shape but also wants PR-cache data to bridge a native row's displayName
+  // back to its username/uuid identity tokens — we pass whatever cache we
+  // have (may be empty pre-fetch; bridge gracefully degrades). Neither
+  // needs the expansion kill-switch or any injected extras, so both run
+  // BEFORE the early-returns below — a popover with no overflow / no PR
+  // cache / expansion-off still gets filtered. Both are idempotent and
+  // safe to re-run after injection.
+  const preCached = getCachedPRs(key);
+  const prePrs = preCached && preCached.ok ? preCached.prs : [];
+  try {
+    applyConfiguredUsersFilter(ul, prePrs);
+  } catch (e) {
+    warnOnce('allowlist-filter-pre', e);
+  }
   try {
     applyOnlyApproversFilter(ul);
   } catch (e) {
@@ -458,7 +481,7 @@ function tryEnrich(popover: HTMLElement, key: string): void {
   }
 
   // Skip the rest (extras injection) when the expansion feature is off.
-  // The filter above is the only deliverable this pass needs to make.
+  // The filters above are the only deliverables this pass needs to make.
   if (!currentSettings.expandBranchCardAvatars) return;
 
   const cached = getCachedPRs(key);
@@ -486,6 +509,16 @@ function tryEnrich(popover: HTMLElement, key: string): void {
   const visible = hiddenSet.size === 0
     ? all
     : all.filter((r) => !hiddenSet.has(r.username.toLowerCase()));
+  // Configured-users allowlist filter: when the user has populated their
+  // approvers table, only reviewers whose username/uuid/displayName matches
+  // an allowlist entry (after canonicalization) are eligible to render. An
+  // empty allowlist short-circuits to no filter (legacy "show everyone"
+  // behavior). Strictly rendering-only: `cached.prs.reviewers` is untouched
+  // so card coloring etc. still see the full list.
+  const allowedSet = buildAllowedIdentitySet(currentSettings);
+  const allowed = allowedSet.size === 0
+    ? visible
+    : visible.filter((r) => isReviewerAllowed(r, allowedSet));
   // Optional "Only show approvers" filter: when the user has flipped this
   // setting ON, drop any reviewer who hasn't approved (pending OR changes-
   // requested). Applied to BOTH the rendered avatar row AND the "+N"
@@ -493,8 +526,8 @@ function tryEnrich(popover: HTMLElement, key: string): void {
   // below). Rendering-only: `cached.prs.reviewers` is untouched, so card
   // coloring and other features still see the full reviewer list.
   const filtered = currentSettings.onlyShowApprovers
-    ? visible.filter((r) => r.approved)
-    : visible;
+    ? allowed.filter((r) => r.approved)
+    : allowed;
   const approved = filtered.filter((r) => r.approved);
   const changesRequested = filtered.filter((r) => !r.approved && r.changesRequested);
   const pending = filtered.filter((r) => !r.approved && !r.changesRequested);
@@ -542,8 +575,9 @@ function tryEnrich(popover: HTMLElement, key: string): void {
     // Re-float any badges Jira's React may have re-mounted inside their
     // parent avatar div's stacking context during a re-render.
     floatBadgesAboveAvatars(ul);
-    // Apply / restore the `onlyShowApprovers` row filter — covers both
-    // injected and native <li>s in this avatar group.
+    // Apply / restore the allowlist + `onlyShowApprovers` row filters —
+    // covers both injected and native <li>s in this avatar group.
+    applyConfiguredUsersFilter(ul, cached.prs);
     applyOnlyApproversFilter(ul);
     return;
   }
@@ -591,9 +625,10 @@ function tryEnrich(popover: HTMLElement, key: string): void {
   // avatar circle itself. See `floatBadgesAboveAvatars` for details.
   floatBadgesAboveAvatars(ul);
 
-  // Apply / restore the `onlyShowApprovers` row filter — covers both
-  // injected and native <li>s in this avatar group. Last step so all <li>s
-  // are in the DOM in their final order before we hide / restore them.
+  // Apply / restore the allowlist + `onlyShowApprovers` row filters — covers
+  // both injected and native <li>s in this avatar group. Last step so all
+  // <li>s are in the DOM in their final order before we hide / restore them.
+  applyConfiguredUsersFilter(ul, cached.prs);
   applyOnlyApproversFilter(ul);
 }
 
@@ -782,8 +817,14 @@ function applyOnlyApproversFilter(ul: HTMLUListElement): void {
       }
     } else if (li.dataset.ejHiddenByOnlyApprovers === '1') {
       // Restore: only touch <li>s WE hid — leaves any other display:none
-      // (Jira-native or future-feature) alone.
-      if (li.style.display === 'none') {
+      // (Jira-native or future-feature) alone. Compose with the allowlist
+      // filter: if the row is ALSO hidden by `applyConfiguredUsersFilter`,
+      // leave the `display:none` in place so un-toggling only-approvers
+      // doesn't un-hide rows the allowlist still wants hidden.
+      if (
+        li.style.display === 'none' &&
+        li.dataset.ejHiddenByAllowlist !== '1'
+      ) {
         li.style.display = '';
       }
       delete li.dataset.ejHiddenByOnlyApprovers;
@@ -812,6 +853,154 @@ function applyOnlyApproversFilter(ul: HTMLUListElement): void {
       // also leave it. Either way nothing to write here.
     }
   }
+}
+
+/**
+ * Hide / restore Jira-native (and injected) avatar `<li>`s based on the user's
+ * configured-users allowlist (`Settings.approvers`). The injected-row path
+ * already screens via `isReviewerAllowed` in `tryEnrich` (so an injected `<li>`
+ * with `dataset.ejHiddenByAllowlist` is the rare "filter was empty at inject
+ * time, now isn't" race), but Jira's native `<li>`s are rendered by Jira's own
+ * React and have to be hidden post-hoc here.
+ *
+ * Matching logic (mirrors `isReviewerAllowed`'s identity-token chain):
+ *   - Build `allowedSet` once via `buildAllowedIdentitySet`.
+ *   - For each native `<li>`, read the hidden `--label` span text and strip
+ *     the trailing " (approved)" / " (changes requested)" suffix.
+ *   - Build a `Map<displayNameCanonical, Set<token>>` from this popover's
+ *     cached `PRState.reviewers` — for every reviewer, attach
+ *     `canonicalizeIdentity(username)` + `canonicalizeIdentity(uuid)` (if
+ *     present) + `canonicalizeIdentity(displayName)` to the set keyed by the
+ *     reviewer's canonical displayName. This bridges back from "what Jira
+ *     painted" (a localized display name) to "the picker's stored tokens"
+ *     (username / uuid / displayName) so a UUID-form picker entry can match a
+ *     native `<li>` it has no way of reading directly.
+ *   - A native `<li>` is allowed if any of `{the row's own canonical
+ *     displayName} ∪ {tokens from the map}` is in `allowedSet`. Otherwise
+ *     hide it.
+ *
+ * Composition with `applyOnlyApproversFilter`:
+ *   - HIDE arm: stamp `dataset.ejHiddenByAllowlist = '1'` so the only-approvers
+ *     restore arm knows we still want the row hidden.
+ *   - RESTORE arm: ALWAYS clear `dataset.ejHiddenByAllowlist`; ONLY set
+ *     `display=''` when `dataset.ejHiddenByOnlyApprovers` is ALSO absent.
+ *   - Empty-allowlist short-circuit takes the same composition guard: restore
+ *     every `ejHiddenByAllowlist`-marked row but defer the `display` reset to
+ *     only-approvers if it's still hiding the same row.
+ *
+ * Idempotency: writes are equality-guarded so re-running does not produce
+ * mutation-observer wakeups. Caller MUST run inside `runWithScopedObserver`.
+ */
+function applyConfiguredUsersFilter(
+  ul: HTMLUListElement,
+  prs: PRState[],
+): void {
+  const allowedSet = buildAllowedIdentitySet(currentSettings);
+  const children = Array.from(ul.children).filter(
+    (el): el is HTMLLIElement => el.tagName === 'LI',
+  );
+
+  if (allowedSet.size === 0) {
+    // Allowlist disabled (no entries configured) — restore any rows we
+    // previously hid. Compose with only-approvers: leave `display:none` in
+    // place when that filter still wants the row hidden.
+    for (const li of children) {
+      if (isOverflowLi(li)) continue;
+      if (li.dataset.ejHiddenByAllowlist !== '1') continue;
+      if (
+        li.style.display === 'none' &&
+        li.dataset.ejHiddenByOnlyApprovers !== '1'
+      ) {
+        li.style.display = '';
+      }
+      delete li.dataset.ejHiddenByAllowlist;
+    }
+    return;
+  }
+
+  // Build the displayName→tokens map from this popover's PR reviewers. The
+  // map is keyed by canonical displayName since that's the only signal we can
+  // read off Jira's native `<li>` (Jira doesn't expose usernames or UUIDs in
+  // the popover markup). Empty `prs` (cache miss / pre-fetch) → empty map →
+  // we fall back to displayName-only matching, which still catches every
+  // allowlist entry the picker stored in displayName form.
+  const tokensByDisplayName = new Map<string, Set<string>>();
+  for (const pr of prs) {
+    for (const r of pr.reviewers) {
+      if (!r.displayName) continue;
+      const dnKey = canonicalizeIdentity(r.displayName);
+      let bucket = tokensByDisplayName.get(dnKey);
+      if (!bucket) {
+        bucket = new Set<string>();
+        tokensByDisplayName.set(dnKey, bucket);
+      }
+      if (r.username) bucket.add(canonicalizeIdentity(r.username));
+      if (r.uuid) bucket.add(canonicalizeIdentity(r.uuid));
+      bucket.add(dnKey);
+    }
+  }
+
+  for (const li of children) {
+    if (isOverflowLi(li)) continue;
+
+    // Skip our own injected `<li>`s — `tryEnrich` already filtered them
+    // through `isReviewerAllowed` before injection. Hiding them again here
+    // via the displayName bridge would be redundant and could double-mark
+    // them. (If they're in the DOM, they passed the filter at inject time.)
+    if (li.getAttribute(EXTRA_LI_ATTR) === 'true') continue;
+
+    const dn = readNativeLiDisplayName(li);
+    const ownToken = dn ? canonicalizeIdentity(dn) : '';
+    let allowed = false;
+    if (ownToken && allowedSet.has(ownToken)) {
+      allowed = true;
+    } else if (ownToken) {
+      const bridge = tokensByDisplayName.get(ownToken);
+      if (bridge) {
+        for (const tok of bridge) {
+          if (allowedSet.has(tok)) {
+            allowed = true;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!allowed) {
+      if (li.style.display !== 'none') {
+        li.style.display = 'none';
+      }
+      if (li.dataset.ejHiddenByAllowlist !== '1') {
+        li.dataset.ejHiddenByAllowlist = '1';
+      }
+    } else if (li.dataset.ejHiddenByAllowlist === '1') {
+      // Row now allowed — restore. Compose with only-approvers: leave
+      // `display:none` in place when that filter still wants it hidden.
+      if (
+        li.style.display === 'none' &&
+        li.dataset.ejHiddenByOnlyApprovers !== '1'
+      ) {
+        li.style.display = '';
+      }
+      delete li.dataset.ejHiddenByAllowlist;
+    }
+  }
+}
+
+/**
+ * Read the canonical (suffix-stripped) display name from a native Jira avatar
+ * `<li>`. The hidden `--label` span carries text like "Alex Arbuckle
+ * (approved)"; the same suffix-strip pattern that `readJiraVisibleNames` uses
+ * applies here. Returns the empty string when no label can be found OR after
+ * stripping yields nothing — caller treats empty as "no matchable identity",
+ * which falls through to hide.
+ */
+function readNativeLiDisplayName(li: HTMLLIElement): string {
+  const label = li.querySelector<HTMLElement>('[data-testid$="--label"]');
+  if (!label) return '';
+  const raw = (label.textContent ?? '').trim();
+  if (!raw) return '';
+  return raw.replace(/\s*\([^)]*\)\s*$/, '').trim();
 }
 
 function isOverflowLi(li: HTMLLIElement): boolean {
@@ -957,6 +1146,25 @@ function buildHiddenUsernameSet(settings: Settings | null): Set<string> {
   if (!settings) return out;
   for (const a of settings.approvers) {
     if (a.isHidden) out.add(a.username.toLowerCase());
+  }
+  return out;
+}
+
+/**
+ * Build the canonicalized identity-token set from every entry in
+ * `settings.approvers`. Both `username` and (when present) `displayName` are
+ * folded in — the picker may have stored either, and the native-row bridge
+ * (`applyConfiguredUsersFilter`) reads displayNames directly off Jira's
+ * `<li>`s. Returns an empty set when no settings are loaded yet OR when no
+ * entries exist, letting the caller short-circuit the filter pass entirely
+ * on the common (no allowlist configured) case.
+ */
+function buildAllowedIdentitySet(settings: Settings | null): Set<string> {
+  const out = new Set<string>();
+  if (!settings) return out;
+  for (const a of settings.approvers) {
+    if (a.username) out.add(canonicalizeIdentity(a.username));
+    if (a.displayName) out.add(canonicalizeIdentity(a.displayName));
   }
   return out;
 }

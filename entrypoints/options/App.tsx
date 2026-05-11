@@ -626,7 +626,7 @@ export function App() {
           <Section title="Bitbucket credentials">
             <ConnectionStatusRow status={status} />
 
-            <Field label="Bitbucket username or email" htmlFor="bb-username">
+            <Field label="Email" htmlFor="bb-username">
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <input
                   id="bb-username"
